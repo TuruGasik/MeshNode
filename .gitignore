@@ -1,2 +1,5 @@
 mosquitto/data/
 mosquitto/log/
+mosquitto/certs/
+mosquitto/passwd
+deploy_certs.sh

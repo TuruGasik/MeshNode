@@ -52,12 +52,23 @@ docker compose logs -f
 ```
 
 - MQTT broker → port **1883**
+- MQTT broker (TLS) → port **8883**
 - Uptime Kuma dashboard → port **3001** (`http://<your-host>:3001`)
 
 ## Configuration
 
 The Mosquitto configuration is located at `mosquitto/config/mosquitto.conf`.  
 Persistent data and logs are stored in Docker named volumes (`mosquitto-data`, `mosquitto-log`, `uptime-kuma-data`).
+
+### Local secrets / files to keep out of git
+
+- `mosquitto/passwd`
+- `mosquitto/certs/`
+- `deploy_certs.sh` (local environment script with domain/path specific values)
+
+### Optional helper scripts
+
+- `scripts/monitor_mosquitto_tls.sh` → monitors Docker logs and prints TLS (`8883`) client connection events.
 
 ## Stopping
 
