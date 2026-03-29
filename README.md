@@ -54,7 +54,7 @@ docker run --rm -v "$(pwd)/mosquitto/passwd:/mosquitto/passwd" \
 ### Access
 
 Open `http://<your-host>:8080` to view the node map.  
-The map refreshes automatically every ~65 seconds and shows all position-reporting nodes heard via MQTT.
+The map refreshes automatically every 65 seconds (set by the upstream meshmap.net frontend) and shows all position-reporting nodes heard via MQTT.
 
 ### Environment variables
 

@@ -4,6 +4,8 @@
 # =============================================================
 
 # ── Stage 1: Build meshobserv ────────────────────────────────
+# Uses golang:latest to track the upstream meshmap.net build requirements.
+# Pin to a specific version (e.g., golang:1.23) if you prefer reproducible builds.
 FROM golang:latest AS build
 
 RUN apt-get update && \
@@ -14,7 +16,8 @@ RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
 
 WORKDIR /build
 
-# Clone meshmap.net source
+# Clone meshmap.net source (latest to stay in sync with upstream).
+# Pin to a specific commit/tag if you prefer reproducible builds.
 RUN git clone --depth 1 https://github.com/brianshea2/meshmap.net.git .
 
 # Clone Meshtastic protobufs and generate Go code
