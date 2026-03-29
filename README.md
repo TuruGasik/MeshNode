@@ -10,7 +10,7 @@ A Mosquitto MQTT broker for Indonesian Meshtastic users with bridges to the Indo
 | Indonesian Community | `mqtt.s-project.web.id` | `idmeshnode` |
 | Global Meshtastic | `mqtt.meshtastic.org` | `meshdev` |
 
-All `msh/#` topics are bridged bidirectionally between this local broker and both remote servers.
+All `msh/ID_923/#` topics (the default Indonesian Meshtastic channel) are bridged bidirectionally between this local broker and both remote servers.
 
 ## Requirements
 
