@@ -13,6 +13,21 @@ services:
       - mosquitto-data:/mosquitto/data
       - mosquitto-log:/mosquitto/log
 
+  meshmap:
+    build: ./meshmap
+    container_name: meshmap
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    environment:
+      - MQTT_BROKER=tcp://meshnode-mqtt:1883
+      - MQTT_USERNAME=meshmap
+      - MQTT_PASSWORD=meshmap
+    volumes:
+      - meshmap-data:/data
+    depends_on:
+      - meshnode-mqtt
+
   uptime-kuma:
     image: louislam/uptime-kuma:1
     container_name: uptime-kuma
@@ -26,3 +41,4 @@ volumes:
   mosquitto-data:
   mosquitto-log:
   uptime-kuma-data:
+  meshmap-data:
