@@ -1,0 +1,8 @@
+# Restrict known local users to Indonesian channel topics only
+user idmeshnode
+topic readwrite msh/ID_923/#
+topic read $SYS/#
+
+user meshmap
+topic readwrite msh/ID_923/#
+topic read $SYS/#

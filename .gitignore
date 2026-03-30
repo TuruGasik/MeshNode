@@ -4,3 +4,5 @@ mosquitto/certs/
 mosquitto/passwd
 deploy_certs.sh
 meshmap/data/
+.env
+docs/
