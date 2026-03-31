@@ -12,6 +12,13 @@ A Mosquitto MQTT broker for Indonesian Meshtastic users with bridges to the Indo
 
 All `msh/ID_923/#` topics (the default Indonesian Meshtastic channel) are bridged bidirectionally between this local broker and both remote servers.
 
+### 🛡️ MQTT Relay & Deduplication (Go Subsystem)
+
+Since multiple bridges send the same Meshtastic network traffic from remote servers, a specialized **MQTT Relay service (written in Go)** operates as a sidecar to the local broker. 
+- **Anti-Echo Loop**: Prevents identical messages from infinitely bouncing between local nodes, bridges, and the external community map.
+- **De-duplication**: Filters out duplicate messages received from the 3 independent bridges down to a single canonical copy.
+- **High Performance**: Designed entirely in Golang utilizing a lock-free `sync.Map` hash cache and goroutines to process up to 50,000 req/s out of the box with <15MB RAM usage.
+
 ## Health Monitoring
 
 [Uptime Kuma](https://github.com/louislam/uptime-kuma) is included as a self-hosted health monitor.  

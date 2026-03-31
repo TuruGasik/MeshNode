@@ -1,8 +1,31 @@
-# Restrict known local users to Indonesian channel topics only
+# =============================================================
+# MeshNode Indonesia - Mosquitto ACL
+# =============================================================
+
+# -------------------------------------------------------
+# Local user: idmeshnode (Meshtastic nodes)
+# -------------------------------------------------------
 user idmeshnode
 topic readwrite msh/ID_923/#
+topic read msh/bridge_in/ID_923/#
+topic read msh/relay/ID_923/#
 topic read $SYS/#
 
+# -------------------------------------------------------
+# Local user: meshmap (Map service)
+# -------------------------------------------------------
 user meshmap
 topic readwrite msh/ID_923/#
+topic read msh/relay/ID_923/#
+topic read $SYS/#
+
+# -------------------------------------------------------
+# Relay dedup service
+# Reads from msh/ID_923/# and writes to msh/relay/ID_923/#
+# -------------------------------------------------------
+user mqtt-relay
+topic read msh/ID_923/#
+topic read msh/bridge_in/ID_923/#
+topic write msh/ID_923/#
+topic write msh/relay/ID_923/#
 topic read $SYS/#

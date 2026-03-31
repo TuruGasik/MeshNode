@@ -23,6 +23,9 @@ RUN git clone --depth 1 https://github.com/brianshea2/meshmap.net.git .
 # Restrict meshmap subscriptions to Indonesian channel only (msh/ID_923)
 RUN perl -0pi -e 's#Topics:\s*\[\]string\{.*?\n\s*\},#Topics: []string{\n                        "msh/ID_923/2/map/",\n                        "msh/ID_923/2/e/+/+",\n                },#s' cmd/meshobserv/meshobserv.go
 
+# Make node tracking permanent by setting expiration to ~100 years
+RUN sed -i 's/NodeExpiration     = 28800/NodeExpiration     = 3600000000/g' cmd/meshobserv/meshobserv.go
+
 # Clone Meshtastic protobufs and generate Go code
 RUN git clone --depth 1 https://github.com/meshtastic/protobufs.git
 RUN protoc -I=protobufs -I=/usr/include \

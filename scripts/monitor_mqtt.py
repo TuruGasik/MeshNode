@@ -15,7 +15,8 @@ SERVERS = {
         "host": "localhost",
         "port": 1883,
         "user": "idmeshnode",
-        "pass": "M3shN0d3",  # Same as community
+        "pass": "M3shN0d3",
+        "topics": ["msh/ID_923/#", "msh/bridge_in/ID_923/#", "msh/relay/ID_923/#"],
     },
     "COMMUNITY": {
         "host": "mqtt.s-project.web.id",
@@ -33,13 +34,15 @@ SERVERS = {
 
 def monitor_server(name, config):
     """Monitor a single server and print messages"""
+    topics = config.get('topics', ["msh/ID_923/#"])
     cmd = [
         "mosquitto_sub",
         "-h", config['host'],
         "-p", str(config['port']),
-        "-t", "msh/ID_923/#",
         "-v"
     ]
+    for t in topics:
+        cmd.extend(["-t", t])
     
     # Add auth if provided
     if config['user'] and config['pass']:

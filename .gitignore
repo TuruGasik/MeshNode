@@ -6,3 +6,4 @@ deploy_certs.sh
 meshmap/data/
 .env
 docs/
+mqtt-relay/mqtt-relay

@@ -40,6 +40,25 @@ services:
     depends_on:
       - meshnode-mqtt
 
+  mqtt-relay:
+    build: ./mqtt-relay
+    container_name: mqtt-relay
+    restart: unless-stopped
+    environment:
+      - MQTT_HOST=meshnode-mqtt
+      - MQTT_PORT=1883
+      - MQTT_USERNAME=mqtt-relay
+      - MQTT_PASSWORD=${RELAY_MQTT_PASSWORD}
+      - SUBSCRIBE_TOPIC=msh/ID_923/#
+      - SUBSCRIBE_BRIDGE_IN=msh/bridge_in/ID_923/#
+      - BRIDGE_IN_PREFIX=msh/bridge_in/
+      - RELAY_PREFIX=msh/relay/
+      - SOURCE_PREFIX=msh/
+      - DEDUP_TTL=600
+      - LOG_LEVEL=DEBUG
+    depends_on:
+      - meshnode-mqtt
+
   uptime-kuma:
     image: louislam/uptime-kuma:1
     container_name: uptime-kuma
