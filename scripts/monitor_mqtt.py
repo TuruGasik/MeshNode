@@ -7,29 +7,32 @@ Shows messages from both servers with timestamps
 import subprocess
 import threading
 import sys
+import os
 from datetime import datetime
 
-# Server configs
+# Server configs — credentials are read from environment variables.
+# Export them before running, or create a .env file and source it:
+#   source .env && python3 scripts/monitor_mqtt.py
 SERVERS = {
     "LOCAL": {
-        "host": "localhost",
-        "port": 1883,
-        "user": "idmeshnode",
-        "pass": "M3shN0d3",
+        "host": os.environ.get("MONITOR_LOCAL_HOST", "localhost"),
+        "port": int(os.environ.get("MONITOR_LOCAL_PORT", "1883")),
+        "user": os.environ.get("MONITOR_LOCAL_USER", ""),
+        "pass": os.environ.get("MONITOR_LOCAL_PASS", ""),
         "topics": ["msh/ID_923/#", "msh/bridge_in/ID_923/#", "msh/relay/ID_923/#"],
     },
     "COMMUNITY": {
-        "host": "mqtt.s-project.web.id",
-        "port": 1883,
-        "user": "idmeshnode",
-        "pass": "M3shN0d3",
+        "host": os.environ.get("MONITOR_COMMUNITY_HOST", "mqtt.s-project.web.id"),
+        "port": int(os.environ.get("MONITOR_COMMUNITY_PORT", "1883")),
+        "user": os.environ.get("MONITOR_COMMUNITY_USER", ""),
+        "pass": os.environ.get("MONITOR_COMMUNITY_PASS", ""),
     },
-    "MESHNODEID": {
-        "host": "103.141.75.100",
-        "port": 1883,
-        "user": "meshnodeid",
-        "pass": "p4d4n6",
-    }
+    # "MESHNODEID": {
+    #     "host": os.environ.get("MONITOR_MESHNODEID_HOST", "103.141.75.100"),
+    #     "port": int(os.environ.get("MONITOR_MESHNODEID_PORT", "1883")),
+    #     "user": os.environ.get("MONITOR_MESHNODEID_USER", ""),
+    #     "pass": os.environ.get("MONITOR_MESHNODEID_PASS", ""),
+    # }
 }
 
 def monitor_server(name, config):
@@ -92,8 +95,8 @@ def main():
     print("-"*70)
     print("LOCAL = localhost (Yellow)")
     print("COMMUNITY = mqtt.s-project.web.id (Green)")
-    print("MESHNODEID = 103.141.75.100 (Blue)")
-    print("-"*70)
+    # print("MESHNODEID = 103.141.75.100 (Blue)")
+    print("-" * 70)
     print("Press Ctrl+C to stop")
     print("="*70)
     print()

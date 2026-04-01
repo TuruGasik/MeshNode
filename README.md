@@ -3,20 +3,44 @@ MeshNode Indonesia MQTT and Map
 
 A Mosquitto MQTT broker for Indonesian Meshtastic users with bridges to the Indonesian community server and the global Meshtastic MQTT server, plus a self-hosted [MeshMap](https://github.com/brianshea2/meshmap.net) that shows nodes on an interactive map.
 
+## Architecture Overview
+
+Local Meshtastic clients use the **standard topic `msh/ID_923/#`** — same as everyone else. Anti-echo and deduplication are handled transparently by the relay service using SHA-256 hashing.
+
+The system uses **three internal namespaces** to prevent echo loops:
+
+1. **`msh/ID_923/#`** — Standard message namespace
+   - Local clients publish AND subscribe here
+   - Relay publishes deduplicated inbound messages here
+   - Relay also subscribes here (self-echo handled by dedup)
+
+2. **`msh/bridge_in/ID_923/#`** — Bridge inbound namespace
+   - External bridges publish raw inbound messages here
+   - Only the relay service subscribes to this namespace
+
+3. **`msh/relay/ID_923/#`** — Bridge outbound namespace
+   - Relay publishes outbound messages here (from local clients)
+   - Bridges pick up messages from here to send externally
+
 ## Bridges
 
 | Connection | Server | Username |
 |---|---|---|
 | Indonesian Community | `mqtt.s-project.web.id` | `idmeshnode` |
 | Global Meshtastic | `mqtt.meshtastic.org` | `meshdev` |
+| MeshNodeID | `103.141.75.100` | `meshnodeid` |
 
-All `msh/ID_923/#` topics (the default Indonesian Meshtastic channel) are bridged bidirectionally between this local broker and both remote servers.
+All bridges are configured to:
+- **Inbound**: Remote `msh/ID_923/#` → Local `msh/bridge_in/ID_923/#`
+- **Outbound**: Local `msh/relay/ID_923/#` → Remote `msh/ID_923/#`
+
+The relay service processes messages from both `msh/ID_923/#` (local clients) and `msh/bridge_in/ID_923/#` (bridge inbound), performs SHA-256 deduplication, and routes them accordingly.
 
 ### 🛡️ MQTT Relay & Deduplication (Go Subsystem)
 
 Since multiple bridges send the same Meshtastic network traffic from remote servers, a specialized **MQTT Relay service (written in Go)** operates as a sidecar to the local broker. 
-- **Anti-Echo Loop**: Prevents identical messages from infinitely bouncing between local nodes, bridges, and the external community map.
-- **De-duplication**: Filters out duplicate messages received from the 3 independent bridges down to a single canonical copy.
+- **Anti-Echo Loop**: Prevents identical messages from bouncing between local nodes, bridges, and external servers through a combination of namespace separation (bridges use `bridge_in/` and `relay/`) and SHA-256 dedup (self-echo and cross-direction echo are automatically dropped).
+- **De-duplication**: Filters out duplicate messages received from the 3 independent bridges down to a single canonical copy. Also prevents local client messages from echoing back via external servers.
 - **High Performance**: Designed entirely in Golang utilizing a lock-free `sync.Map` hash cache and goroutines to process up to 50,000 req/s out of the box with <15MB RAM usage.
 
 ## Health Monitoring
@@ -33,7 +57,7 @@ After opening the dashboard (`http://<your-host>:3001`) and creating an admin ac
 | Local MQTT Broker | TCP Port | `meshnode-mqtt` (or `localhost`) | `1883` |
 | Bridge – Indonesian Community | TCP Port | `mqtt.s-project.web.id` | `1883` |
 | Bridge – Global Meshtastic | TCP Port | `mqtt.meshtastic.org` | `1883` |
-| MeshMap | HTTP(s) | `http://meshmap` (or `http://localhost:8080`) | — |
+| MeshMap | HTTP(s) | `https://<your-domain>` (or `http://localhost`) | — |
 
 > **Tip – MQTT monitor type:** Uptime Kuma also has a native **MQTT** monitor.  
 > Use it to verify that messages are actually flowing through a bridge:  
@@ -60,16 +84,32 @@ docker run --rm -v "$(pwd)/mosquitto/passwd:/mosquitto/passwd" \
 
 ### Access
 
-Open `http://<your-host>:8080` to view the node map.  
+Open `https://<your-domain>` (port **80** / **443**) to view the node map.  
 The map refreshes automatically every 65 seconds (set by the upstream meshmap.net frontend) and shows all position-reporting nodes heard via MQTT.
 
-### Environment variables
+### Environment variables (MeshMap)
 
 | Variable | Default | Description |
 |---|---|---|
 | `MQTT_BROKER` | `tcp://meshnode-mqtt:1883` | MQTT broker URL |
 | `MQTT_USERNAME` | `meshmap` | MQTT username |
 | `MQTT_PASSWORD` | `meshmap` | MQTT password |
+
+### Environment variables (MQTT Relay)
+
+| Variable | Default | Description |
+|---|---|---|
+| `MQTT_HOST` | `meshnode-mqtt` | MQTT broker hostname |
+| `MQTT_PORT` | `1883` | MQTT broker port |
+| `MQTT_USERNAME` | `mqtt-relay` | MQTT username for relay |
+| `MQTT_PASSWORD` | (from `.env`) | MQTT password for relay |
+| `SUBSCRIBE_TOPIC` | `msh/ID_923/#` | Standard message topic (local clients + relay self-echo) |
+| `SUBSCRIBE_BRIDGE_IN` | `msh/bridge_in/ID_923/#` | Bridge inbound topic |
+| `BRIDGE_IN_PREFIX` | `msh/bridge_in/` | Prefix for bridge inbound topics |
+| `RELAY_PREFIX` | `msh/relay/` | Prefix for outbound relay topics |
+| `SOURCE_PREFIX` | `msh/` | Canonical topic prefix |
+| `DEDUP_TTL` | `600` | Deduplication TTL in seconds |
+| `LOG_LEVEL` | `INFO` | Log level (DEBUG/INFO/WARN/ERROR) |
 
 ## Requirements
 
@@ -83,7 +123,17 @@ The map refreshes automatically every 65 seconds (set by the upstream meshmap.ne
 git clone https://github.com/TuruGasik/MeshNode.git
 cd MeshNode
 
-# Start the broker and monitoring dashboard
+# Copy and edit the environment file
+cp .env.example .env
+# Edit .env with your credentials (bridge usernames/passwords, TLS domain, etc.)
+
+# Create MQTT users for meshmap and mqtt-relay
+docker run --rm -v "$(pwd)/mosquitto/passwd:/mosquitto/passwd" \
+  eclipse-mosquitto:2 mosquitto_passwd -b /mosquitto/passwd meshmap <your-meshmap-password>
+docker run --rm -v "$(pwd)/mosquitto/passwd:/mosquitto/passwd" \
+  eclipse-mosquitto:2 mosquitto_passwd -b /mosquitto/passwd mqtt-relay <your-relay-password>
+
+# Start all services
 docker compose up -d
 
 # Check logs
@@ -92,7 +142,7 @@ docker compose logs -f
 
 - MQTT broker → port **1883**
 - MQTT broker (TLS) → port **8883**
-- MeshMap (node map) → port **8080** (`http://<your-host>:8080`)
+- MeshMap (node map) → port **80** / **443** (`https://<your-domain>`)
 - Uptime Kuma dashboard → port **3001** (`http://<your-host>:3001`)
 
 ## Configuration
@@ -108,10 +158,27 @@ Persistent data and logs are stored in Docker named volumes (`mosquitto-data`, `
 
 ### Optional helper scripts
 
-- `scripts/monitor_mosquitto_tls.sh` → monitors Docker logs and prints TLS (`8883`) client connection events.
+- `scripts/monitor_mosquitto_tls.sh` — monitors Docker logs and prints TLS (`8883`) client connection events.
+- `scripts/monitor_mqtt.py` — monitors multiple MQTT servers simultaneously (LOCAL, COMMUNITY, MESHNODEID).
+- `scripts/monitor_mqtt_relay.py` — monitors the relay dedup pipeline (bridge_in vs clean vs relayed) with stats.
+
+> **Note:** The monitoring scripts read credentials from environment variables (`MONITOR_LOCAL_USER`, etc.).
+> See `.env.example` for the full list. Run with: `source .env && python3 scripts/monitor_mqtt.py`
 
 ## Stopping
 
 ```bash
 docker compose down
 ```
+
+### Konfigurasi Meshtastic Client
+
+| Parameter | Nilai |
+|---|---|
+| **Address** | `mqtt://kemplu.dari.asia:1883` |
+| **Username** | `idmeshnode` |
+| **Password** | `M3shN0d3` |
+| **Root topic** | `msh/ID_923` |
+
+> **Note:** Root topic menggunakan `msh/ID_923` — standard topic yang sama dengan semua user Meshtastic lainnya.
+> Anti-echo loop ditangani secara otomatis oleh relay dedup service.

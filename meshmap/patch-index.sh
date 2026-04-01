@@ -8,6 +8,30 @@
 
 INDEX="/usr/share/nginx/html/index.html"
 
+# Helper: verify a pattern exists in index.html before patching
+assert_pattern() {
+  if ! grep -q "$1" "$INDEX"; then
+    echo "[FATAL] Pattern not found in index.html — upstream may have changed: $1" >&2
+    exit 1
+  fi
+}
+
+# Validate all required patterns exist before making any changes
+echo "[patch] Validating upstream index.html patterns..."
+assert_pattern "center: window.localStorage.getItem('center')"
+assert_pattern "zoom: window.localStorage.getItem('zoom')"
+assert_pattern "worldCopyJump: true,"
+assert_pattern '<title>MeshMap'
+assert_pattern 'content="A nearly live map'
+assert_pattern 'meshmap.net/'
+assert_pattern '<div id="header">'
+assert_pattern 'let lastActiveNode'
+assert_pattern 'const toggleDark ='
+assert_pattern 'const updateNodes = data =>'
+assert_pattern 'const lastSeen = Math.max'
+assert_pattern 'Meshtastic MQTT'
+echo "[patch] All patterns validated OK"
+
 # 1. Change default center and zoom to Indonesia
 sed -i "s|center: window.localStorage.getItem('center')?.split(',') ?? \[25, 0\]|center: window.localStorage.getItem('center')?.split(',') ?? [-2.5, 118]|" "$INDEX"
 sed -i "s|zoom: window.localStorage.getItem('zoom') ?? 2|zoom: window.localStorage.getItem('zoom') ?? 5|" "$INDEX"
@@ -35,8 +59,11 @@ sed -i '/let lastActiveNode/a \  let filterOnline = window.localStorage.getItem(
 sed -i '/const toggleDark =/i \  const toggleFilter = () => {\n    filterOnline = document.getElementById("filterOnline").checked;\n    filterOffline = document.getElementById("filterOffline").checked;\n    window.localStorage.setItem("filterOnline", filterOnline);\n    window.localStorage.setItem("filterOffline", filterOffline);\n    if (window.meshmapData) updateNodes(window.meshmapData);\n  }' "$INDEX"
 
 # Insert logic to skip nodes based on the checkboxes selection
-sed -i 's/const updateNodes = data => {/const updateNodes = data => {\n    window.meshmapData = data;\n    let cOn=0, cOff=0;\n    Object.values(data).forEach(n=>{const ls=Math.max(...Object.values(n.seenBy)); if((Date.now()\/1000-ls)>86400)cOff++; else cOn++;});\n    const elOn=document.getElementById("labelOn"); if(elOn) elOn.innerText=`🟢 Online (${cOn})`;\n    const elOff=document.getElementById("labelOff"); if(elOff) elOff.innerText=`🔴 Offline (${cOff})`;/g' "$INDEX"
-sed -i 's/const lastSeen = Math.max(...Object.values(seenBy))/const lastSeen = Math.max(...Object.values(seenBy))\n      const isOffline = (Date.now() \/ 1000 - lastSeen) > 86400;\n      if (isOffline \&\& !filterOffline) return;\n      if (!isOffline \&\& !filterOnline) return;/g' "$INDEX"
+sed -i 's/const updateNodes = data => {/const updateNodes = data => {\n    window.meshmapData = data;\n    let cOn=0, cOff=0;\n    Object.values(data).forEach(n=>{const ls=Math.max(...Object.values(n.seenBy)); if((Date.now()\/1000-ls)>43200)cOff++; else cOn++;});\n    const elOn=document.getElementById("labelOn"); if(elOn) elOn.innerText=`🟢 Online (${cOn})`;\n    const elOff=document.getElementById("labelOff"); if(elOff) elOff.innerText=`🔴 Offline (${cOff})`;/g' "$INDEX"
+sed -i 's/const lastSeen = Math.max(...Object.values(seenBy))/const lastSeen = Math.max(...Object.values(seenBy))\n      const isOffline = (Date.now() \/ 1000 - lastSeen) > 43200;\n      if (isOffline \&\& !filterOffline) return;\n      if (!isOffline \&\& !filterOnline) return;/g' "$INDEX"
+
+# Patch opacity: online nodes fade 100%→25% over 12h, offline nodes always 100%
+sed -i 's|const opacity = 1.0 - (Date.now() / 1000 - lastSeen) / 43200|const opacity = isOffline ? 1.0 : Math.max(0.25, 1.0 - (Date.now() / 1000 - lastSeen) / 43200)|g' "$INDEX"
 
 # Make checkbox reflect localStorage state when page loads
 sed -i '/const toggleDark =/i \  document.addEventListener("DOMContentLoaded", () => {\n    const cbOn = document.getElementById("filterOnline");\n    if (cbOn) cbOn.checked = filterOnline;\n    const cbOff = document.getElementById("filterOffline");\n    if (cbOff) cbOff.checked = filterOffline;\n  });' "$INDEX"

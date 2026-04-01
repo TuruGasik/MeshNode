@@ -31,19 +31,25 @@ func Hash(topic string, payload []byte) string {
 }
 
 // IsNew returns true if the hash has not been seen within the TTL window.
-// If it's new, it atomically stores it. Thread-safe via sync.Map.
+// Uses LoadOrStore for atomic check-and-set to prevent race conditions
+// where two goroutines could both see "not found" simultaneously.
 func (d *DedupStore) IsNew(hash string) bool {
 	now := time.Now().Unix()
 
-	if val, ok := d.store.Load(hash); ok {
-		ts := val.(int64)
-		if now-ts < int64(d.ttl.Seconds()) {
-			return false // duplicate within TTL
-		}
+	val, loaded := d.store.LoadOrStore(hash, now)
+	if !loaded {
+		return true // first time seeing this hash
 	}
 
-	d.store.Store(hash, now)
-	return true
+	// Entry exists — check if it's expired
+	ts := val.(int64)
+	if now-ts >= int64(d.ttl.Seconds()) {
+		// Expired entry, refresh timestamp
+		d.store.Store(hash, now)
+		return true
+	}
+
+	return false // duplicate within TTL
 }
 
 // CleanupLoop periodically evicts expired hashes from the store.

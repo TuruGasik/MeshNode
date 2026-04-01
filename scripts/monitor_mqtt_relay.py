@@ -5,7 +5,7 @@ Shows raw bridge inbound vs clean deduped vs outbound relay messages
 with dedup stats.
 
 Architecture (v2):
-  📥 BRIDGE_IN : msh/bridge_in/ID_923/#  — raw from bridges (3x dups)
+  📥 BRIDGE_IN : msh/bridge_in/ID_923/#  — raw from bridges (2x dups)
   📦 CLEAN     : msh/ID_923/#            — deduped by relay for clients
   📤 RELAYED   : msh/relay/ID_923/#      — outbound to bridges
 """
@@ -13,16 +13,26 @@ Architecture (v2):
 import subprocess
 import threading
 import sys
+import os
 import hashlib
 from datetime import datetime
 from collections import defaultdict
 
-# Server config
+# Server config — credentials from environment variables.
+# Load .env if exists
+env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env")
+if os.path.exists(env_path):
+    with open(env_path) as f:
+        for line in f:
+            if "=" in line and not line.strip().startswith("#"):
+                k, v = line.strip().split("=", 1)
+                os.environ.setdefault(k, v)
+
 BROKER = {
-    "host": "localhost",
-    "port": 1883,
-    "user": "idmeshnode",
-    "pass": "M3shN0d3",
+    "host": os.environ.get("MONITOR_LOCAL_HOST", "localhost"),
+    "port": int(os.environ.get("MONITOR_LOCAL_PORT", "1883")),
+    "user": os.environ.get("MONITOR_LOCAL_USER", os.environ.get("MQTT_USERNAME", "")),
+    "pass": os.environ.get("MONITOR_LOCAL_PASS", os.environ.get("MQTT_PASSWORD", "")),
 }
 
 # Topics to monitor (v2 — 3 namespaces)
@@ -187,6 +197,14 @@ def monitor_topic(label, topic):
             if msg_count % 30 == 0:
                 print_stats()
 
+        # If we reach here, the process terminated
+        proc.wait()
+        if proc.returncode != 0:
+            err = proc.stderr.read().decode("utf-8", errors="ignore").strip()
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ {label} disconnected! mosquitto_sub error ({proc.returncode}): {err}")
+        else:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] 🛑 {label} stream ended cleanly.")
+
     except FileNotFoundError:
         print(f"❌ mosquitto_sub not found. Install: apt install mosquitto-clients")
     except Exception as e:
@@ -208,13 +226,13 @@ def main():
     print("\033[1m  🔄 MQTT RELAY MONITOR v2 — Deduplication Tracker\033[0m")
     print("\033[1m" + "=" * 70 + "\033[0m")
     print(f"  📡 Broker   : {BROKER['host']}:{BROKER['port']}")
-    print(f"  \033[93m📥 BRIDGE_IN : {TOPICS['BRIDGE_IN']}\033[0m (raw dari bridge, 3x dups)")
+    print(f"  \033[93m📥 BRIDGE_IN : {TOPICS['BRIDGE_IN']}\033[0m (raw dari bridge, 2x dups)")
     print(f"  \033[96m📦 CLEAN     : {TOPICS['CLEAN']}\033[0m (deduped untuk client)")
     print(f"  \033[92m📤 RELAYED   : {TOPICS['RELAYED']}\033[0m (outbound ke bridge)")
     print(f"  🕐 Started  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("\033[90m" + "-" * 70 + "\033[0m")
     print("  Relay bekerja jika: RAW >> CLEAN (duplikat dibuang)")
-    print("  Ratio ideal : CLEAN ≈ RAW/3 (3 bridge, 1 unik)")
+    print("  Ratio ideal : CLEAN ≈ RAW/2 (2 bridge, 1 unik)")
     print("\033[90m" + "-" * 70 + "\033[0m")
     print("  Press Ctrl+C to stop")
     print("\033[1m" + "=" * 70 + "\033[0m")

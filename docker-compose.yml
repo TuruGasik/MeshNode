@@ -20,6 +20,12 @@ services:
       - ./mosquitto/certs:/mosquitto/certs:ro
       - mosquitto-data:/mosquitto/data
       - mosquitto-log:/mosquitto/log
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -t '$$SYS/broker/uptime' -C 1 -W 3 -u $${BRIDGE_COMMUNITY_USER} -P $${BRIDGE_COMMUNITY_PASS} 2>/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
 
   meshmap:
     build: ./meshmap
@@ -34,11 +40,18 @@ services:
       - MQTT_PASSWORD=${MQTT_PASSWORD}
     volumes:
       - meshmap-data:/data
-      - /etc/letsencrypt/live/kemplu.dari.asia/fullchain.pem:/certs/fullchain.pem:ro
-      - /etc/letsencrypt/live/kemplu.dari.asia/privkey.pem:/certs/privkey.pem:ro
-      - /etc/letsencrypt/archive/kemplu.dari.asia:/certs/archive:ro
+      - /etc/letsencrypt/live/${TLS_DOMAIN}/fullchain.pem:/certs/fullchain.pem:ro
+      - /etc/letsencrypt/live/${TLS_DOMAIN}/privkey.pem:/certs/privkey.pem:ro
+      - /etc/letsencrypt/archive/${TLS_DOMAIN}:/certs/archive:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-check-certificate -qO- https://localhost/nodes.json >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     depends_on:
-      - meshnode-mqtt
+      meshnode-mqtt:
+        condition: service_healthy
 
   mqtt-relay:
     build: ./mqtt-relay
@@ -55,18 +68,26 @@ services:
       - RELAY_PREFIX=msh/relay/
       - SOURCE_PREFIX=msh/
       - DEDUP_TTL=600
-      - LOG_LEVEL=DEBUG
+      - LOG_LEVEL=INFO
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1 2>/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     depends_on:
-      - meshnode-mqtt
+      meshnode-mqtt:
+        condition: service_healthy
 
   uptime-kuma:
-    image: louislam/uptime-kuma:1
+    image: louislam/uptime-kuma:2
     container_name: uptime-kuma
     restart: unless-stopped
     ports:
       - "3001:3001"
     volumes:
       - uptime-kuma-data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
 
 volumes:
   mosquitto-data:

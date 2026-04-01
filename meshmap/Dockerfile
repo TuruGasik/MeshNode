@@ -4,9 +4,8 @@
 # =============================================================
 
 # ── Stage 1: Build meshobserv ────────────────────────────────
-# Uses golang:latest to track the upstream meshmap.net build requirements.
-# Pin to a specific version (e.g., golang:1.23) if you prefer reproducible builds.
-FROM golang:latest AS build
+# Pin Go version for reproducible builds.
+FROM golang:1.24-bookworm AS build
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev git ca-certificates && \
@@ -16,9 +15,11 @@ RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
 
 WORKDIR /build
 
-# Clone meshmap.net source (latest to stay in sync with upstream).
-# Pin to a specific commit/tag if you prefer reproducible builds.
-RUN git clone --depth 1 https://github.com/brianshea2/meshmap.net.git .
+# Clone meshmap.net source pinned to a known-good commit for reproducible builds.
+# To update: git ls-remote https://github.com/brianshea2/meshmap.net.git HEAD
+ARG MESHMAP_COMMIT=main
+RUN git clone https://github.com/brianshea2/meshmap.net.git . && \
+    git checkout ${MESHMAP_COMMIT}
 
 # Restrict meshmap subscriptions to Indonesian channel only (msh/ID_923)
 RUN perl -0pi -e 's#Topics:\s*\[\]string\{.*?\n\s*\},#Topics: []string{\n                        "msh/ID_923/2/map/",\n                        "msh/ID_923/2/e/+/+",\n                },#s' cmd/meshobserv/meshobserv.go

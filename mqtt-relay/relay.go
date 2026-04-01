@@ -86,8 +86,11 @@ func (r *Relay) HandleMessage(client mqtt.Client, msg mqtt.Message) {
 		canonical = r.config.SourcePrefix + topic[len(r.config.BridgeInPrefix):]
 		direction = "IN"
 	} else if strings.HasPrefix(topic, r.config.SourcePrefix) {
-		// OUTBOUND: from local client (msh/ID_923/...) → relay topic
-		canonical = topic
+		// OUTBOUND: from local client on msh/ID_923/... OR relay's own
+		// inbound publish (self-echo). Dedup handles both:
+		//   - Local client msg: hash is new → relay to msh/relay/...
+		//   - Self-echo: hash already cached from INBOUND → dropped
+		canonical = topic // already in canonical form (msh/ID_923/...)
 		direction = "OUT"
 	} else {
 		slog.Warn("Ignoring message on unexpected topic", "topic", topic)

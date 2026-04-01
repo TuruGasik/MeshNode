@@ -21,13 +21,13 @@ type Config struct {
 	MQTTPort          int
 	MQTTUsername      string
 	MQTTPassword      string
-	SubscribeTopic    string
-	SubscribeBridgeIn string
-	RelayPrefix       string
-	SourcePrefix      string
-	BridgeInPrefix    string
-	DedupTTL          int // seconds
-	CleanupInterval   int // seconds
+	SubscribeTopic    string // e.g. "msh/ID_923/#" — local client + relay self-echo
+	SubscribeBridgeIn string // e.g. "msh/bridge_in/ID_923/#" — raw bridge inbound
+	RelayPrefix       string // e.g. "msh/relay/" — outbound to bridges
+	SourcePrefix      string // e.g. "msh/" — canonical topic prefix
+	BridgeInPrefix    string // e.g. "msh/bridge_in/" — bridge inbound prefix
+	DedupTTL          int    // seconds
+	CleanupInterval   int    // seconds
 	LogLevel          string
 }
 
@@ -124,6 +124,7 @@ func main() {
 		SetPassword(cfg.MQTTPassword).
 		SetCleanSession(true).
 		SetAutoReconnect(true).
+		SetOrderMatters(false). // parallel message processing — no queuing behind DROPs
 		SetConnectRetry(true).
 		SetConnectRetryInterval(5 * time.Second).
 		SetMaxReconnectInterval(30 * time.Second).
