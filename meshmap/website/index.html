@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#fff">
+<meta name="description" content="Peta realtime node Meshtastic Indonesia - MeshNode Indonesia">
+<title>MeshNode Indonesia - Peta Node Meshtastic</title>
+<link rel="preload" href="/api/nodes/map" as="fetch" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900">
+<link rel="stylesheet" href="https://unpkg.com/font-awesome@4.7.0/css/font-awesome.min.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet-easybutton@2.4.0/src/easy-button.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet-search@4.0.0/dist/leaflet-search.min.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css">
+<link rel="stylesheet" href="/css/style.css">
+<link rel="manifest" href="/site.webmanifest">
+
+<div id="header">
+  <div id="meshnode-filter" style="font-size: 13px; display: flex; gap: 8px; flex-shrink: 0;">
+    <label style="cursor: pointer; white-space: nowrap;"><input type="checkbox" id="filterOnline" onchange="toggleFilter()" checked> <span id="labelOn">🟢 Online</span></label>
+    <label style="cursor: pointer; white-space: nowrap;"><input type="checkbox" id="filterOffline" onchange="toggleFilter()"> <span id="labelOff">🔴 Offline</span></label>
+  </div>
+  <div>
+    <a href="/" title="Peta realtime node Meshtastic Indonesia">MeshNode Indonesia</a>
+  </div>
+  <div>
+    <a href="#" onclick="toggleDark();return false;" title="Toggle dark mode">
+      <i class="fa fa-moon-o fa-lg dark-hidden"></i>
+      <i class="fa fa-sun-o fa-lg dark-only"></i>
+    </a>
+  </div>
+  <div><a href="https://www.meshnode.id/" target="_blank" title="Website"><i class="fa fa-globe fa-lg"></i></a></div><div><a href="https://x.com/meshnodeid" target="_blank" title="X (Twitter)"><i class="fa fa-twitter fa-lg"></i></a></div><div class="social-hide-sm"><a href="https://instagram.com/meshnodeid" target="_blank" title="Instagram"><i class="fa fa-instagram fa-lg"></i></a></div><div class="social-hide-sm"><a href="https://facebook.com/meshnodeid" target="_blank" title="Facebook"><i class="fa fa-facebook-official fa-lg"></i></a></div><div><a href="https://discord.gg/aeAj2SCwQ" target="_blank" title="Discord (Chat Channel)"><i class="fa fa-comments fa-lg"></i></a></div>
+  <div><a href="#" onclick="openNodeDbModal(); return false;" title="Node Database"><i class="fa fa-database fa-lg"></i></a></div>
+  <div><a href="#" onclick="openAboutModal(); return false;" title="Tentang MeshNode Indonesia"><i class="fa fa-info-circle fa-lg"></i></a></div>
+  <div>
+    <a href="https://meshtastic.org/" title="Powered by Meshtastic">
+      <img alt="Meshtastic" src="/img/m-pwrd_bw_noborder-min.svg" style="width:1.2em;height:1.2em;">
+    </a>
+  </div>
+</div>
+<div id="map"></div>
+
+<!-- About Modal -->
+<div id="aboutModal">
+  <div id="aboutModal-overlay" onclick="closeAboutModal()"></div>
+  <div id="aboutModal-content">
+    <div id="aboutModal-card">
+      <button class="am-close" onclick="closeAboutModal()" aria-label="Close">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+        </svg>
+      </button>
+      <div class="am-app-info">
+        <img src="/img/android-chrome-192x192.png" alt="MeshNode Indonesia">
+        <h1>MeshNode Indonesia</h1>
+        <p>Peta realtime node Meshtastic Indonesia</p>
+        <div class="am-social-btns">
+          <a class="am-social-btn" style="background:#6b7280;" href="https://www.meshnode.id/" target="_blank" title="Website"><i class="fa fa-globe"></i></a>
+          <a class="am-social-btn" style="background:#1da1f2;" href="https://x.com/meshnodeid" target="_blank" title="X (Twitter)"><i class="fa fa-twitter"></i></a>
+          <a class="am-social-btn" style="background:#e4405f;" href="https://instagram.com/meshnodeid" target="_blank" title="Instagram"><i class="fa fa-instagram"></i></a>
+          <a class="am-social-btn" style="background:#1877f2;" href="https://facebook.com/meshnodeid" target="_blank" title="Facebook"><i class="fa fa-facebook-official"></i></a>
+          <a class="am-social-btn" style="background:#5865f2;" href="https://discord.gg/aeAj2SCwQ" target="_blank" title="Discord"><i class="fa fa-comments"></i></a>
+        </div>
+      </div>
+      <div class="am-box am-box-green">
+        👋 Selamat datang di peta node Meshtastic Indonesia! Peta ini menampilkan node-node Meshtastic yang terdeteksi di jaringan MQTT Indonesia.
+      </div>
+      <div class="am-section">
+        <div class="am-section-title">Fitur</div>
+        <div class="am-box">
+          <ul>
+            <li>Peta menunjukkan node yang mengirimkan posisi valid ke MQTT</li>
+            <li>Posisi harus dalam format tidak terenkripsi atau terenkripsi dengan kunci default</li>
+            <li>Gunakan pencarian untuk menemukan node berdasarkan ID atau nama</li>
+            <li>Arahkan kursor ke node (di desktop) untuk melihat detail dasar</li>
+            <li>Klik node untuk melihat info seperti telemetri dan hubungan antar node</li>
+          </ul>
+        </div>
+      </div>
+      <div class="am-section">
+        <div class="am-section-title">FAQ</div>
+        <div class="am-box">
+          <div class="am-q">Bagaimana cara menambahkan node saya ke peta?</div>
+          <div>Node Anda, atau node yang mendengar node Anda harus melakukan uplink ke server MQTT kami.</div>
+          <div>Paket posisi harus tidak terenkripsi, atau terenkripsi dengan kunci default.</div>
+          <div>Jika node Anda memiliki firmware v2.5 atau lebih baru, Anda harus mengaktifkan "OK to MQTT".</div>
+          <div>Gunakan detail server MQTT di bawah untuk melakukan uplink ke peta ini.</div>
+        </div>
+        <div class="am-box">
+          <div class="am-q">Server MQTT mana yang harus saya gunakan?</div>
+          <ul>
+            <li>Alamat: <code>mqtt.meshnode.id</code></li>
+            <li>Nama Pengguna: <code>uplink</code></li>
+            <li>Kata Sandi: <code>uplink</code></li>
+            <li>Enkripsi Diaktifkan: Ya</li>
+            <li>Keluaran JSON: Tidak</li>
+            <li>TLS Diaktifkan: Ya</li>
+          </ul>
+          <div>Catatan: downlink dinonaktifkan. Kami menyarankan menjalankan node khusus untuk uplink ke peta.</div>
+        </div>
+        <div class="am-box">
+          <div class="am-q">Bagaimana cara menghapus node saya dari peta?</div>
+          <div>Node yang tidak aktif lebih dari 1 hari otomatis disembunyikan dari peta, tapi datanya tetap tersimpan di database.</div>
+          <div>Nonaktifkan pelaporan posisi di node Anda untuk mencegah kemunculan kembali.</div>
+          <div>Gunakan kunci enkripsi khusus sehingga publik tidak bisa melihat data posisi Anda.</div>
+        </div>
+        <div class="am-box">
+          <div class="am-q">Mengapa node saya muncul di tempat yang salah?</div>
+          <div>Peta publik ini membuat posisi Anda agak samar untuk firmware v2.4 dan lebih lama. Node pada v2.4 dan lebih lama memiliki posisi yang disamarkan hingga 2 digit desimal.</div>
+        </div>
+      </div>
+      <div class="am-section">
+        <div class="am-section-title">Legalitas</div>
+        <div class="am-box">
+          <div>Proyek ini tidak berafiliasi atau didukung oleh proyek <a href="https://meshtastic.org" target="_blank">Meshtastic</a>.</div>
+          <div>Logo Meshtastic adalah merek dagang dari Meshtastic LLC.</div>
+          <div>Tile peta disediakan oleh <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a>.</div>
+        </div>
+      </div>
+      <div class="am-dismiss">
+        <button onclick="closeAboutModal()">Tutup</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Node Database Modal -->
+<div id="nodeDbModal">
+  <div id="nodeDbModal-overlay" onclick="closeNodeDbModal()"></div>
+  <div id="nodeDbModal-content">
+    <div id="nodeDbModal-card">
+      <button class="am-close" onclick="closeNodeDbModal()" aria-label="Close">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+        </svg>
+      </button>
+      <div class="nd-header">
+        <h2><i class="fa fa-database"></i> Node Database</h2>
+        <div class="nd-search-box">
+          <i class="fa fa-search"></i>
+          <input id="ndSearchInput" type="text" placeholder="Cari node (nama, ID, hex)..." oninput="ndSearch()">
+        </div>
+      </div>
+      <div class="nd-filters">
+        <button class="nd-filter-btn active" data-filter="all" onclick="ndSetFilter('all')">Semua</button>
+        <button class="nd-filter-btn" data-filter="online" onclick="ndSetFilter('online')">Online</button>
+        <button class="nd-filter-btn" data-filter="offline" onclick="ndSetFilter('offline')">Offline</button>
+        <button class="nd-filter-btn" data-filter="dead" onclick="ndSetFilter('dead')">Dead</button>
+        <button class="nd-filter-btn" data-filter="with_position" onclick="ndSetFilter('with_position')">Punya Posisi</button>
+        <button class="nd-filter-btn" data-filter="no_position" onclick="ndSetFilter('no_position')">Tanpa Posisi</button>
+        <span class="nd-stats" id="ndStats"></span>
+      </div>
+      <div class="nd-list" id="ndList">
+        <table class="nd-table">
+          <thead>
+            <tr>
+              <th>Node</th>
+              <th>ID</th>
+              <th class="nd-hide-sm">Model</th>
+              <th class="nd-hide-sm">Region</th>
+              <th>Status</th>
+              <th>Terakhir</th>
+            </tr>
+          </thead>
+          <tbody id="ndBody"></tbody>
+        </table>
+      </div>
+      <div class="nd-load-more" id="ndLoadMore" style="display:none;">
+        <button onclick="ndLoadMore()">Muat lebih banyak...</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-easybutton@2.4.0/src/easy-button.js"></script>
+<script src="https://unpkg.com/leaflet-search@4.0.0/dist/leaflet-search.min.js"></script>
+<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+<script src="/js/app.js"></script>

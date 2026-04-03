@@ -44,7 +44,7 @@ services:
       - /etc/letsencrypt/live/${TLS_DOMAIN}/privkey.pem:/certs/privkey.pem:ro
       - /etc/letsencrypt/archive/${TLS_DOMAIN}:/certs/archive:ro
     healthcheck:
-      test: ["CMD-SHELL", "wget --no-check-certificate -qO- https://localhost/nodes.json >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/api/nodes/stats >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3

@@ -1,15 +1,14 @@
 #!/bin/sh
 set -e
 
-# Seed an empty node database so nginx can serve /nodes.json immediately
+# Seed an empty node database so meshobserv can warm-start
 if [ ! -f /data/nodes.json ]; then
   echo '{}' > /data/nodes.json
 fi
 
-# Start meshobserv in the background (MQTT listener → writes /data/nodes.json)
+# Start meshobserv in the background (MQTT listener → SQLite + in-memory NodeDB)
 # meshobserv uses log.Fatal() on timeout which kills the process, so we
-# wrap it in a retry loop. The loop runs via a separate shell process to
-# survive meshobserv crashes. We use 'nohup' style approach so it persists.
+# wrap it in a retry loop.
 (
   while true; do
     echo "[meshmap] starting meshobserv (connecting to ${MQTT_BROKER:-tcp://meshnode-mqtt:1883})..."
