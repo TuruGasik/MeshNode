@@ -1,4 +1,5 @@
 // ── State ──
+const mapOnly = new URLSearchParams(window.location.search).get('mapOnly') === 'true'
 let lastActiveNode
 let filterOnline = window.localStorage.getItem('filterOnline') !== 'false'
 let filterOffline = window.localStorage.getItem('filterOffline') === 'true'
@@ -45,6 +46,7 @@ function toggleFilter() {
 
 // ── About modal ──
 function openAboutModal() {
+  if (mapOnly) return
   const m = document.getElementById('aboutModal')
   m.style.display = 'block'
   requestAnimationFrame(() => requestAnimationFrame(() => m.classList.add('am-open')))
@@ -61,6 +63,7 @@ function closeAboutModal() {
 let ndFilter = 'all', ndOffset = 0, ndSearchTimer = null
 
 function openNodeDbModal() {
+  if (mapOnly) return
   const m = document.getElementById('nodeDbModal')
   m.style.display = 'block'
   requestAnimationFrame(() => requestAnimationFrame(() => m.classList.add('nd-open')))
@@ -497,5 +500,9 @@ document.addEventListener('DOMContentLoaded', () => {
   if (cbOn) cbOn.checked = filterOnline
   const cbOff = document.getElementById('filterOffline')
   if (cbOff) cbOff.checked = filterOffline
-  if (!window.localStorage.getItem('welcomeSeen')) openAboutModal()
+  if (mapOnly) {
+    document.getElementById('header').style.display = 'none'
+    document.getElementById('map').style.top = '0'
+  }
+  if (!mapOnly && !window.localStorage.getItem('welcomeSeen')) openAboutModal()
 })
