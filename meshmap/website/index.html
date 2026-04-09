@@ -30,7 +30,7 @@
       <i class="fa fa-sun-o fa-lg dark-only"></i>
     </a>
   </div>
-  <div><a href="https://www.meshnode.id/" target="_blank" title="Website"><i class="fa fa-globe fa-lg"></i></a></div><div><a href="https://x.com/meshnodeid" target="_blank" title="X (Twitter)"><i class="fa fa-twitter fa-lg"></i></a></div><div class="social-hide-sm"><a href="https://instagram.com/meshnodeid" target="_blank" title="Instagram"><i class="fa fa-instagram fa-lg"></i></a></div><div class="social-hide-sm"><a href="https://facebook.com/meshnodeid" target="_blank" title="Facebook"><i class="fa fa-facebook-official fa-lg"></i></a></div><div><a href="https://discord.gg/aeAj2SCwQ" target="_blank" title="Discord (Chat Channel)"><i class="fa fa-comments fa-lg"></i></a></div>
+  <!-- <div><a href="https://www.meshnode.id/" target="_blank" title="Website"><i class="fa fa-globe fa-lg"></i></a></div><div><a href="https://x.com/meshnodeid" target="_blank" title="X (Twitter)"><i class="fa fa-twitter fa-lg"></i></a></div><div class="social-hide-sm"><a href="https://instagram.com/meshnodeid" target="_blank" title="Instagram"><i class="fa fa-instagram fa-lg"></i></a></div><div class="social-hide-sm"><a href="https://facebook.com/meshnodeid" target="_blank" title="Facebook"><i class="fa fa-facebook-official fa-lg"></i></a></div><div><a href="https://discord.gg/aeAj2SCwQ" target="_blank" title="Discord (Chat Channel)"><i class="fa fa-comments fa-lg"></i></a></div> -->
   <div><a href="#" onclick="openNodeDbModal(); return false;" title="Node Database"><i class="fa fa-database fa-lg"></i></a></div>
   <div><a href="#" onclick="openAboutModal(); return false;" title="Tentang MeshNode Indonesia"><i class="fa fa-info-circle fa-lg"></i></a></div>
   <div>
@@ -64,57 +64,52 @@
         </div>
       </div>
       <div class="am-box am-box-green">
-        👋 Selamat datang di peta node Meshtastic Indonesia! Peta ini menampilkan node-node Meshtastic yang terdeteksi di jaringan MQTT Indonesia.
+        👋 Selamat datang di peta node Meshtastic Indonesia! Peta ini menampilkan node-node aktif yang terdeteksi melalui jaringan MQTT komunitas Indonesia.
       </div>
       <div class="am-section">
         <div class="am-section-title">Fitur</div>
         <div class="am-box">
           <ul>
-            <li>Peta menunjukkan node yang mengirimkan posisi valid ke MQTT</li>
-            <li>Posisi harus dalam format tidak terenkripsi atau terenkripsi dengan kunci default</li>
-            <li>Gunakan pencarian untuk menemukan node berdasarkan ID atau nama</li>
-            <li>Arahkan kursor ke node (di desktop) untuk melihat detail dasar</li>
-            <li>Klik node untuk melihat info seperti telemetri dan hubungan antar node</li>
+            <li>Menampilkan node yang mengirimkan posisi GPS valid ke server MQTT</li>
+            <li>Posisi harus tidak terenkripsi atau menggunakan kunci enkripsi default</li>
+            <li>Gunakan fitur pencarian untuk menemukan node berdasarkan ID atau nama</li>
+            <li>Arahkan kursor ke node (desktop) atau ketuk (mobile) untuk melihat info singkat</li>
+            <li>Klik node untuk melihat detail lengkap seperti telemetri dan koneksi antar node</li>
           </ul>
         </div>
       </div>
       <div class="am-section">
         <div class="am-section-title">FAQ</div>
         <div class="am-box">
-          <div class="am-q">Bagaimana cara menambahkan node saya ke peta?</div>
-          <div>Node Anda, atau node yang mendengar node Anda harus melakukan uplink ke server MQTT kami.</div>
-          <div>Paket posisi harus tidak terenkripsi, atau terenkripsi dengan kunci default.</div>
-          <div>Jika node Anda memiliki firmware v2.5 atau lebih baru, Anda harus mengaktifkan "OK to MQTT".</div>
-          <div>Gunakan detail server MQTT di bawah untuk melakukan uplink ke peta ini.</div>
+          <div class="am-q">Bagaimana cara agar node saya muncul di peta?</div>
+          <div>Node kamu — atau node lain yang mendengar sinyalmu — harus melakukan uplink ke server MQTT kami. Paket posisi harus tidak terenkripsi atau menggunakan kunci enkripsi default. Jika menggunakan firmware v2.5 ke atas, pastikan opsi <strong>"OK to MQTT"</strong> sudah diaktifkan. Gunakan detail server MQTT di bawah untuk terhubung ke peta ini.</div>
         </div>
         <div class="am-box">
-          <div class="am-q">Server MQTT mana yang harus saya gunakan?</div>
+          <div class="am-q">Server MQTT mana yang harus digunakan?</div>
           <ul>
-            <li>Alamat: <code>kemplu.dari.asia</code></li>
-            <li>Nama Pengguna: <code>idmeshnode</code></li>
-            <li>Kata Sandi: <code>M3shN0d3</code></li>
-            <li>Enkripsi Diaktifkan: Ya</li>
-            <li>Keluaran JSON: Tidak</li>
-            <li>TLS Diaktifkan: Ya</li>
+            <li>Address: <code>mqtt.meshnode.id</code></li>
+            <li>Username: <code>idmeshnode</code></li>
+            <li>Password: <code>node4all</code></li>
+            <li>Enkripsi: Aktif</li>
+            <li>JSON Output: Tidak</li>
+            <li>TLS: Aktif</li>
           </ul>
-          <div>Catatan: Kami menyarankan menjalankan node khusus untuk uplink ke peta.</div>
+          <div>Catatan: Disarankan menggunakan node terpisah yang terhubung ke internet khusus untuk uplink ke peta, agar node utamamu tetap berjalan di jaringan mesh lokal.</div>
         </div>
         <div class="am-box">
           <div class="am-q">Bagaimana cara menghapus node saya dari peta?</div>
-          <div>Node yang tidak aktif lebih dari 1 hari otomatis disembunyikan dari peta, tapi datanya tetap tersimpan di database.</div>
-          <div>Nonaktifkan pelaporan posisi di node Anda untuk mencegah kemunculan kembali.</div>
-          <div>Gunakan kunci enkripsi khusus sehingga publik tidak bisa melihat data posisi Anda.</div>
+          <div>Node yang tidak aktif selama lebih dari 1 hari akan otomatis disembunyikan dari tampilan peta, namun datanya tetap tersimpan di database. Untuk mencegah node muncul kembali, nonaktifkan pelaporan posisi di pengaturan node kamu. Alternatifnya, gunakan kunci enkripsi kustom agar data posisimu tidak dapat dibaca publik.</div>
         </div>
         <div class="am-box">
-          <div class="am-q">Mengapa node saya muncul di tempat yang salah?</div>
-          <div>Peta publik ini membuat posisi Anda agak samar untuk firmware v2.4 dan lebih lama. Node pada v2.4 dan lebih lama memiliki posisi yang disamarkan hingga 2 digit desimal.</div>
+          <div class="am-q">Mengapa node saya muncul di lokasi yang tidak tepat?</div>
+          <div>Peta ini secara sengaja menyamarkan posisi node yang menggunakan firmware v2.4 atau lebih lama — akurasi posisi dibatasi hingga 2 angka desimal saja. Perbarui firmware ke v2.5 ke atas untuk mendapatkan posisi yang lebih akurat di peta.</div>
         </div>
       </div>
       <div class="am-section">
         <div class="am-section-title">Legalitas</div>
         <div class="am-box">
-          <div>Proyek ini tidak berafiliasi atau didukung oleh proyek <a href="https://meshtastic.org" target="_blank">Meshtastic</a>.</div>
-          <div>Logo Meshtastic adalah merek dagang dari Meshtastic LLC.</div>
+          <div>Proyek ini tidak berafiliasi dengan atau didukung secara resmi oleh proyek <a href="https://meshtastic.org" target="_blank">Meshtastic</a>.</div>
+          <div>Logo Meshtastic adalah merek dagang milik Meshtastic LLC.</div>
           <div>Tile peta disediakan oleh <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a>.</div>
         </div>
       </div>
@@ -124,6 +119,7 @@
     </div>
   </div>
 </div>
+
 
 <!-- Node Database Modal -->
 <div id="nodeDbModal">
