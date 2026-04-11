@@ -26,9 +26,9 @@ The system uses **three internal namespaces** to prevent echo loops:
 
 | Connection | Server | Username |
 |---|---|---|
-| Indonesian Community | `mqtt.s-project.web.id` | `idmeshnode` |
+| Indonesian Community | `mqtt.meshnode.id` | `idmeshnode` |
 | Global Meshtastic | `mqtt.meshtastic.org` | `meshdev` |
-| MeshNodeID | `103.141.75.100` | `meshnodeid` |
+| Padang | `103.141.75.100` | `meshnodeid` |
 
 All bridges are configured to:
 - **Inbound**: Remote `msh/ID_923/#` → Local `msh/bridge_in/ID_923/#`
@@ -55,8 +55,9 @@ After opening the dashboard (`http://<your-host>:3001`) and creating an admin ac
 | Name | Type | Host / URL | Port / Topic |
 |---|---|---|---|
 | Local MQTT Broker | TCP Port | `meshnode-mqtt` (or `localhost`) | `1883` |
-| Bridge – Indonesian Community | TCP Port | `mqtt.s-project.web.id` | `1883` |
+| Bridge – Indonesian Community | TCP Port | `mqtt.meshnode.id` | `1883` |
 | Bridge – Global Meshtastic | TCP Port | `mqtt.meshtastic.org` | `1883` |
+| Bridge – Padang | TCP Port | `103.141.75.100` | `1883` |
 | MeshMap | HTTP(s) | `https://<your-domain>` (or `http://localhost`) | — |
 
 > **Tip – MQTT monitor type:** Uptime Kuma also has a native **MQTT** monitor.  
@@ -85,7 +86,7 @@ docker run --rm -v "$(pwd)/mosquitto/passwd:/mosquitto/passwd" \
 ### Access
 
 Open `https://<your-domain>` (port **80** / **443**) to view the node map.  
-The map refreshes automatically every 65 seconds (set by the upstream meshmap.net frontend) and shows all position-reporting nodes heard via MQTT.
+Multiple domains can be served from the same instance — e.g. `map.dari.asia` and `map.meshnode.id` both point to the same map and API.
 
 ### Environment variables (MeshMap)
 
@@ -159,7 +160,7 @@ Persistent data and logs are stored in Docker named volumes (`mosquitto-data`, `
 ### Optional helper scripts
 
 - `scripts/monitor_mosquitto_tls.sh` — monitors Docker logs and prints TLS (`8883`) client connection events.
-- `scripts/monitor_mqtt.py` — monitors multiple MQTT servers simultaneously (LOCAL, COMMUNITY, MESHNODEID).
+- `scripts/monitor_mqtt.py` — monitors multiple MQTT servers simultaneously (LOCAL, COMMUNITY, PADANG).
 - `scripts/monitor_mqtt_relay.py` — monitors the relay dedup pipeline (bridge_in vs clean vs relayed) with stats.
 
 > **Note:** The monitoring scripts read credentials from environment variables (`MONITOR_LOCAL_USER`, etc.).
@@ -177,7 +178,7 @@ docker compose down
 |---|---|
 | **Address** | `mqtt://kemplu.dari.asia:1883` |
 | **Username** | `idmeshnode` |
-| **Password** | `M3shN0d3` |
+| **Password** | `node4all` |
 | **Root topic** | `msh/ID_923` |
 
 > **Note:** Root topic menggunakan `msh/ID_923` — standard topic yang sama dengan semua user Meshtastic lainnya.

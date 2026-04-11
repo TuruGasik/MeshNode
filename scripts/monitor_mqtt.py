@@ -22,16 +22,16 @@ SERVERS = {
         "topics": ["msh/ID_923/#", "msh/bridge_in/ID_923/#", "msh/relay/ID_923/#"],
     },
     "COMMUNITY": {
-        "host": os.environ.get("MONITOR_COMMUNITY_HOST", "mqtt.s-project.web.id"),
+        "host": os.environ.get("MONITOR_COMMUNITY_HOST", "mqtt.meshnode.id"),
         "port": int(os.environ.get("MONITOR_COMMUNITY_PORT", "1883")),
         "user": os.environ.get("MONITOR_COMMUNITY_USER", ""),
         "pass": os.environ.get("MONITOR_COMMUNITY_PASS", ""),
     },
-    # "MESHNODEID": {
-    #     "host": os.environ.get("MONITOR_MESHNODEID_HOST", "103.141.75.100"),
-    #     "port": int(os.environ.get("MONITOR_MESHNODEID_PORT", "1883")),
-    #     "user": os.environ.get("MONITOR_MESHNODEID_USER", ""),
-    #     "pass": os.environ.get("MONITOR_MESHNODEID_PASS", ""),
+    # "PADANG": {
+    #     "host": os.environ.get("MONITOR_PADANG_HOST", "103.141.75.100"),
+    #     "port": int(os.environ.get("MONITOR_PADANG_PORT", "1883")),
+    #     "user": os.environ.get("MONITOR_PADANG_USER", ""),
+    #     "pass": os.environ.get("MONITOR_PADANG_PASS", ""),
     # }
 }
 
@@ -76,7 +76,7 @@ def monitor_server(name, config):
             colors = {
                 "LOCAL": "\033[93m",      # Yellow
                 "COMMUNITY": "\033[92m",  # Green
-                "MESHNODEID": "\033[94m", # Blue
+                "PADANG": "\033[94m", # Blue
             }
             color = colors.get(name, "\033[0m")
             reset = "\033[0m"
@@ -94,8 +94,8 @@ def main():
     print(f"🕐 Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("-"*70)
     print("LOCAL = localhost (Yellow)")
-    print("COMMUNITY = mqtt.s-project.web.id (Green)")
-    # print("MESHNODEID = 103.141.75.100 (Blue)")
+    print("COMMUNITY = mqtt.meshnode.id (Green)")
+    # print("PADANG = 103.141.75.100 (Blue)")
     print("-" * 70)
     print("Press Ctrl+C to stop")
     print("="*70)

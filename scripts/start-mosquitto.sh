@@ -4,7 +4,7 @@ set -eu
 TEMPLATE_PATH="/mosquitto/config/mosquitto.conf.template"
 RENDERED_PATH="/tmp/mosquitto.conf"
 
-required_vars="BRIDGE_COMMUNITY_USER BRIDGE_COMMUNITY_PASS BRIDGE_GLOBAL_USER BRIDGE_GLOBAL_PASS BRIDGE_MESHNODEID_USER BRIDGE_MESHNODEID_PASS"
+required_vars="BRIDGE_COMMUNITY_USER BRIDGE_COMMUNITY_PASS BRIDGE_GLOBAL_USER BRIDGE_GLOBAL_PASS"
 for var_name in $required_vars; do
   eval "var_value=\${$var_name:-}"
   if [ -z "$var_value" ]; then

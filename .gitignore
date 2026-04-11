@@ -7,3 +7,4 @@ meshmap/data/
 .env
 docs/
 mqtt-relay/mqtt-relay
+migrasi/
