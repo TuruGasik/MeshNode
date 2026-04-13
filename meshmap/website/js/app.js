@@ -228,7 +228,7 @@ const attribution = L.control.attribution({ position: 'bottomright', prefix: fal
 
 const updateNodeCount = count => attribution.setPrefix(`
   ${count.toLocaleString()} nodes from
-  <a href="https://www.meshnode.id/">MeshNode Indonesia / ID_923 Network</a>
+  <a href="https://www.meshnode.id/">MeshNode Indonesia / ID Network</a>
 `)
 
 map.on('moveend', () => {

@@ -252,6 +252,8 @@ func main() {
 		Username: username,
 		Password: password,
 		Topics: []string{
+			"msh/ID/2/map/",
+			"msh/ID/2/e/+/+",
 			"msh/ID_923/2/map/",
 			"msh/ID_923/2/e/+/+",
 		},

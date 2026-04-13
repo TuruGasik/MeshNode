@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -21,8 +24,8 @@ type Config struct {
 	MQTTPort          int
 	MQTTUsername      string
 	MQTTPassword      string
-	SubscribeTopic    string // e.g. "msh/ID_923/#" — local client + relay self-echo
-	SubscribeBridgeIn string // e.g. "msh/bridge_in/ID_923/#" — raw bridge inbound
+	SubscribeTopic    string // e.g. "msh/ID/#" — local client + relay self-echo
+	SubscribeBridgeIn string // e.g. "msh/bridge_in/ID/#" — raw bridge inbound
 	RelayPrefix       string // e.g. "msh/relay/" — outbound to bridges
 	SourcePrefix      string // e.g. "msh/" — canonical topic prefix
 	BridgeInPrefix    string // e.g. "msh/bridge_in/" — bridge inbound prefix
@@ -38,8 +41,8 @@ func LoadConfig() *Config {
 		MQTTPort:          getEnvInt("MQTT_PORT", 1883),
 		MQTTUsername:      getEnv("MQTT_USERNAME", "mqtt-relay"),
 		MQTTPassword:      getEnv("MQTT_PASSWORD", ""),
-		SubscribeTopic:    getEnv("SUBSCRIBE_TOPIC", "msh/ID_923/#"),
-		SubscribeBridgeIn: getEnv("SUBSCRIBE_BRIDGE_IN", "msh/bridge_in/ID_923/#"),
+		SubscribeTopic:    getEnv("SUBSCRIBE_TOPIC", "msh/ID/#"),
+		SubscribeBridgeIn: getEnv("SUBSCRIBE_BRIDGE_IN", "msh/bridge_in/ID/#"),
 		RelayPrefix:       getEnv("RELAY_PREFIX", "msh/relay/"),
 		SourcePrefix:      getEnv("SOURCE_PREFIX", "msh/"),
 		BridgeInPrefix:    getEnv("BRIDGE_IN_PREFIX", "msh/bridge_in/"),
@@ -63,6 +66,104 @@ func getEnvInt(key string, fallback int) int {
 		}
 	}
 	return fallback
+}
+
+// HealthState tracks the health of the relay service.
+type HealthState struct {
+	connected atomic.Bool
+	lastMsgAt atomic.Int64 // unix timestamp
+	startedAt time.Time
+	stats     *Stats
+	dedupSize func() int
+}
+
+// NewHealthState creates a new HealthState tracker.
+func NewHealthState(stats *Stats, dedupSize func() int) *HealthState {
+	return &HealthState{
+		stats:     stats,
+		dedupSize: dedupSize,
+		startedAt: time.Now(),
+	}
+}
+
+// SetConnected updates the connection status.
+func (h *HealthState) SetConnected(connected bool) {
+	h.connected.Store(connected)
+}
+
+// Touch updates the last message received time.
+func (h *HealthState) Touch() {
+	h.lastMsgAt.Store(time.Now().Unix())
+}
+
+// Status returns the current health status.
+func (h *HealthState) Status() map[string]any {
+	connected := h.connected.Load()
+	lastMsgUnix := h.lastMsgAt.Load()
+	uptime := time.Since(h.startedAt)
+
+	// Determine health status
+	var status string
+	var reason string
+	if !connected {
+		status = "unhealthy"
+		reason = "MQTT disconnected"
+	} else if lastMsgUnix > 0 && time.Since(time.Unix(lastMsgUnix, 0)) > 10*time.Minute {
+		status = "degraded"
+		reason = "No messages received in 10 minutes"
+	} else {
+		status = "healthy"
+	}
+
+	return map[string]any{
+		"status":         status,
+		"reason":         reason,
+		"mqtt_connected": connected,
+		"uptime_seconds": int(uptime.Seconds()),
+		"last_message_at": func() string {
+			if lastMsgUnix == 0 {
+				return ""
+			}
+			return time.Unix(lastMsgUnix, 0).UTC().Format(time.RFC3339)
+		}(),
+		"stats": map[string]int64{
+			"received":    h.stats.Received.Load(),
+			"relayed_in":  h.stats.RelayedIn.Load(),
+			"relayed_out": h.stats.RelayedOut.Load(),
+			"dropped":     h.stats.Dropped.Load(),
+			"cache_size":  int64(h.dedupSize()),
+		},
+	}
+}
+
+// startHealthServer starts an HTTP server exposing /health endpoint.
+func startHealthServer(health *HealthState, addr string) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		data := health.Status()
+		status := data["status"].(string)
+		if status == "healthy" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+		} else {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+		json.NewEncoder(w).Encode(data)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			http.NotFound(w, r)
+			return
+		}
+	})
+
+	go func() {
+		slog.Info("Health server listening", "addr", addr)
+		if err := http.ListenAndServe(addr, mux); err != nil {
+			slog.Error("Health server failed", "error", err)
+		}
+	}()
 }
 
 // parseSlogLevel converts a log level string to slog.Level.
@@ -110,7 +211,14 @@ func main() {
 
 	// Initialize dedup store
 	dedup := NewDedupStore(time.Duration(cfg.DedupTTL) * time.Second)
-	relay := NewRelay(cfg, dedup)
+
+	// Initialize health tracker
+	health := NewHealthState(nil, dedup.Size)
+	startHealthServer(health, ":8081")
+
+	// Initialize relay with health callback
+	relay := NewRelay(cfg, dedup, health.Touch)
+	health.stats = relay.stats
 
 	// Start cleanup goroutine
 	go dedup.CleanupLoop(time.Duration(cfg.CleanupInterval) * time.Second)
@@ -132,6 +240,7 @@ func main() {
 		SetDefaultPublishHandler(relay.HandleMessage).
 		SetOnConnectHandler(func(client mqtt.Client) {
 			slog.Info("Connected to MQTT broker", "broker", broker)
+			health.SetConnected(true)
 
 			// Subscribe to bridge inbound (raw, potentially duplicated)
 			if token := client.Subscribe(cfg.SubscribeBridgeIn, 0, nil); token.Wait() && token.Error() != nil {
@@ -155,6 +264,7 @@ func main() {
 		}).
 		SetConnectionLostHandler(func(client mqtt.Client, err error) {
 			slog.Warn("Connection lost, will auto-reconnect…", "error", err)
+			health.SetConnected(false)
 		}).
 		SetReconnectingHandler(func(client mqtt.Client, opts *mqtt.ClientOptions) {
 			slog.Info("Reconnecting to MQTT broker…")

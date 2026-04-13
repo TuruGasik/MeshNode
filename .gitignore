@@ -8,3 +8,4 @@ meshmap/data/
 docs/
 mqtt-relay/mqtt-relay
 migrasi/
+*.db

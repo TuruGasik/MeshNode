@@ -19,7 +19,7 @@ SERVERS = {
         "port": int(os.environ.get("MONITOR_LOCAL_PORT", "1883")),
         "user": os.environ.get("MONITOR_LOCAL_USER", ""),
         "pass": os.environ.get("MONITOR_LOCAL_PASS", ""),
-        "topics": ["msh/ID_923/#", "msh/bridge_in/ID_923/#", "msh/relay/ID_923/#"],
+        "topics": ["msh/ID/#", "msh/bridge_in/ID/#", "msh/relay/ID/#"],
     },
     "COMMUNITY": {
         "host": os.environ.get("MONITOR_COMMUNITY_HOST", "mqtt.meshnode.id"),

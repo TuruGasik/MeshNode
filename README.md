@@ -5,20 +5,20 @@ A Mosquitto MQTT broker for Indonesian Meshtastic users with bridges to the Indo
 
 ## Architecture Overview
 
-Local Meshtastic clients use the **standard topic `msh/ID_923/#`** — same as everyone else. Anti-echo and deduplication are handled transparently by the relay service using SHA-256 hashing.
+Local Meshtastic clients use the **standard topic `msh/ID/#`** — same as everyone else. Anti-echo and deduplication are handled transparently by the relay service using SHA-256 hashing.
 
 The system uses **three internal namespaces** to prevent echo loops:
 
-1. **`msh/ID_923/#`** — Standard message namespace
+1. **`msh/ID/#`** — Standard message namespace
    - Local clients publish AND subscribe here
    - Relay publishes deduplicated inbound messages here
    - Relay also subscribes here (self-echo handled by dedup)
 
-2. **`msh/bridge_in/ID_923/#`** — Bridge inbound namespace
+2. **`msh/bridge_in/ID/#`** — Bridge inbound namespace
    - External bridges publish raw inbound messages here
    - Only the relay service subscribes to this namespace
 
-3. **`msh/relay/ID_923/#`** — Bridge outbound namespace
+3. **`msh/relay/ID/#`** — Bridge outbound namespace
    - Relay publishes outbound messages here (from local clients)
    - Bridges pick up messages from here to send externally
 
@@ -31,10 +31,10 @@ The system uses **three internal namespaces** to prevent echo loops:
 | Padang | `103.141.75.100` | `meshnodeid` |
 
 All bridges are configured to:
-- **Inbound**: Remote `msh/ID_923/#` → Local `msh/bridge_in/ID_923/#`
-- **Outbound**: Local `msh/relay/ID_923/#` → Remote `msh/ID_923/#`
+- **Inbound**: Remote `msh/ID/#` → Local `msh/bridge_in/ID/#`
+- **Outbound**: Local `msh/relay/ID/#` → Remote `msh/ID/#`
 
-The relay service processes messages from both `msh/ID_923/#` (local clients) and `msh/bridge_in/ID_923/#` (bridge inbound), performs SHA-256 deduplication, and routes them accordingly.
+The relay service processes messages from both `msh/ID/#` (local clients) and `msh/bridge_in/ID/#` (bridge inbound), performs SHA-256 deduplication, and routes them accordingly.
 
 ### 🛡️ MQTT Relay & Deduplication (Go Subsystem)
 
@@ -62,7 +62,7 @@ After opening the dashboard (`http://<your-host>:3001`) and creating an admin ac
 
 > **Tip – MQTT monitor type:** Uptime Kuma also has a native **MQTT** monitor.  
 > Use it to verify that messages are actually flowing through a bridge:  
-> set the broker URL to `mqtt://localhost:1883`, subscribe to `msh/ID_923/#`,  
+> set the broker URL to `mqtt://localhost:1883`, subscribe to `msh/ID/#`,  
 > and configure the expected keyword/value your nodes publish.
 
 ## MeshMap (Node Map)
@@ -104,8 +104,8 @@ Multiple domains can be served from the same instance — e.g. `map.dari.asia` a
 | `MQTT_PORT` | `1883` | MQTT broker port |
 | `MQTT_USERNAME` | `mqtt-relay` | MQTT username for relay |
 | `MQTT_PASSWORD` | (from `.env`) | MQTT password for relay |
-| `SUBSCRIBE_TOPIC` | `msh/ID_923/#` | Standard message topic (local clients + relay self-echo) |
-| `SUBSCRIBE_BRIDGE_IN` | `msh/bridge_in/ID_923/#` | Bridge inbound topic |
+| `SUBSCRIBE_TOPIC` | `msh/ID/#` | Standard message topic (local clients + relay self-echo) |
+| `SUBSCRIBE_BRIDGE_IN` | `msh/bridge_in/ID/#` | Bridge inbound topic |
 | `BRIDGE_IN_PREFIX` | `msh/bridge_in/` | Prefix for bridge inbound topics |
 | `RELAY_PREFIX` | `msh/relay/` | Prefix for outbound relay topics |
 | `SOURCE_PREFIX` | `msh/` | Canonical topic prefix |
@@ -179,7 +179,7 @@ docker compose down
 | **Address** | `mqtt://kemplu.dari.asia:1883` |
 | **Username** | `idmeshnode` |
 | **Password** | `node4all` |
-| **Root topic** | `msh/ID_923` |
+| **Root topic** | `msh/ID` |
 
-> **Note:** Root topic menggunakan `msh/ID_923` — standard topic yang sama dengan semua user Meshtastic lainnya.
+> **Note:** Root topic menggunakan `msh/ID` — standard topic yang sama dengan semua user Meshtastic lainnya.
 > Anti-echo loop ditangani secara otomatis oleh relay dedup service.

@@ -1,6 +1,7 @@
 services:
   meshnode-mqtt:
     build: .
+    image: meshnode-mqtt
     container_name: meshnode-mqtt
     restart: unless-stopped
     environment:
@@ -39,6 +40,7 @@ services:
       - MQTT_USERNAME=${MQTT_USERNAME}
       - MQTT_PASSWORD=${MQTT_PASSWORD}
     volumes:
+      - ./meshmap/website:/usr/share/nginx/html
       - meshmap-data:/data
       - /etc/letsencrypt/live/${TLS_DOMAIN}/fullchain.pem:/certs/fullchain.pem:ro
       - /etc/letsencrypt/live/${TLS_DOMAIN}/privkey.pem:/certs/privkey.pem:ro
@@ -62,15 +64,15 @@ services:
       - MQTT_PORT=1883
       - MQTT_USERNAME=mqtt-relay
       - MQTT_PASSWORD=${RELAY_MQTT_PASSWORD}
-      - SUBSCRIBE_TOPIC=msh/ID_923/#
-      - SUBSCRIBE_BRIDGE_IN=msh/bridge_in/ID_923/#
+      - SUBSCRIBE_TOPIC=msh/ID/#
+      - SUBSCRIBE_BRIDGE_IN=msh/bridge_in/ID/#
       - BRIDGE_IN_PREFIX=msh/bridge_in/
       - RELAY_PREFIX=msh/relay/
       - SOURCE_PREFIX=msh/
       - DEDUP_TTL=600
       - LOG_LEVEL=INFO
     healthcheck:
-      test: ["CMD-SHELL", "kill -0 1 2>/dev/null || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8081/health >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

@@ -30,17 +30,19 @@ func (s *Stats) String() string {
 
 // Relay handles MQTT message routing and deduplication.
 type Relay struct {
-	config *Config
-	dedup  *DedupStore
-	stats  *Stats
+	config    *Config
+	dedup     *DedupStore
+	stats     *Stats
+	onMessage func() // callback for health tracking
 }
 
 // NewRelay creates a new Relay instance.
-func NewRelay(cfg *Config, dedup *DedupStore) *Relay {
+func NewRelay(cfg *Config, dedup *DedupStore, onMessage func()) *Relay {
 	return &Relay{
-		config: cfg,
-		dedup:  dedup,
-		stats:  &Stats{},
+		config:    cfg,
+		dedup:     dedup,
+		stats:     &Stats{},
+		onMessage: onMessage,
 	}
 }
 
@@ -73,6 +75,9 @@ func (r *Relay) HandleMessage(client mqtt.Client, msg mqtt.Message) {
 	}
 
 	r.stats.Received.Add(1)
+	if r.onMessage != nil {
+		r.onMessage()
+	}
 
 	// ---------------------------------------------------------------
 	// Determine direction and canonical topic
@@ -81,16 +86,16 @@ func (r *Relay) HandleMessage(client mqtt.Client, msg mqtt.Message) {
 	var direction string
 
 	if strings.HasPrefix(topic, r.config.BridgeInPrefix) {
-		// INBOUND: from bridge (msh/bridge_in/ID_923/...) → clean topic
-		// Canonical: strip bridge_in/ → msh/ID_923/...
+		// INBOUND: from bridge (msh/bridge_in/ID/...) → clean topic
+		// Canonical: strip bridge_in/ → msh/ID/...
 		canonical = r.config.SourcePrefix + topic[len(r.config.BridgeInPrefix):]
 		direction = "IN"
 	} else if strings.HasPrefix(topic, r.config.SourcePrefix) {
-		// OUTBOUND: from local client on msh/ID_923/... OR relay's own
+		// OUTBOUND: from local client on msh/ID/... OR relay's own
 		// inbound publish (self-echo). Dedup handles both:
 		//   - Local client msg: hash is new → relay to msh/relay/...
 		//   - Self-echo: hash already cached from INBOUND → dropped
-		canonical = topic // already in canonical form (msh/ID_923/...)
+		canonical = topic // already in canonical form (msh/ID/...)
 		direction = "OUT"
 	} else {
 		slog.Warn("Ignoring message on unexpected topic", "topic", topic)

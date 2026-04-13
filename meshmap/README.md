@@ -1,12 +1,12 @@
 # MeshNode Indonesia — Peta Node Meshtastic
 
-Peta realtime node [Meshtastic](https://meshtastic.org/) di jaringan **ID_923** Indonesia.  
+Peta realtime node [Meshtastic](https://meshtastic.org/) di jaringan **ID** Indonesia.  
 Berdasarkan [meshmap.net](https://github.com/brianshea2/meshmap.net) oleh Brian Shea (AGPL-3.0), di-custom untuk komunitas [MeshNode Indonesia](https://github.com/TuruGasik/MeshNode).
 
 **Live:** [map.dari.asia](https://map.dari.asia)
 
 ## Fitur
-- Menampilkan semua node yang mengirim posisi valid via MQTT di kanal ID_923
+- Menampilkan semua node yang mengirim posisi valid via MQTT di kanal ID
 - Data node diperbarui setiap ~1 menit
 - Node yang tidak aktif > 1 hari otomatis disembunyikan dari peta (tetap tersimpan di database)
 - Duplikasi node (nama sama, device di-reflash) otomatis di-hide jika ada yang online
