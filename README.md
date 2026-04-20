@@ -150,16 +150,16 @@ Relay dibuat sebagai service Go terpisah agar kontrol flow lebih jelas dibanding
 
 ```mermaid
 flowchart LR
-	A[mqtt.meshnode.id<br/>Upstream A] --> R[mqtt-relay<br/>dedup + routing]
-	B[mqtt.meshtastic.org<br/>Upstream B] --> R
-	R --> L[EMQX local broker<br/>meshnode-mqtt]
+	A["mqtt.meshnode.id<br/>Upstream A"] --> R["mqtt-relay<br/>dedup + routing"]
+	B["mqtt.meshtastic.org<br/>Upstream B"] --> R
+	R --> L["EMQX local broker<br/>meshnode-mqtt"]
 	L --> R
 	R --> A
 	R --> B
-	L --> M[MeshMap / local clients]
+	L --> M["MeshMap / local clients"]
 
-	D[(Dedup cache<br/>SHA256(topic + payload)<br/>TTL 600s)] --- R
-	H[/Health endpoint<br/>:8081/health/] --- R
+	D["Dedup cache<br/>SHA256(topic + payload)<br/>TTL 600s"] --- R
+	H["Health endpoint<br/>:8081/health"] --- R
 ```
 
 Komponen utamanya:
