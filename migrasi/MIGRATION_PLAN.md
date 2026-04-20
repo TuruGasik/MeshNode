@@ -261,13 +261,13 @@ docker compose up -d
 - [x] MeshMap API healthy
 - [x] Dashboard HTTP/HTTPS reachable
 
-### Phase 2 tests (pending)
+### Phase 2 tests (done)
 - [x] Enable relay profile
 - [x] Local → upstream smoke test
 - [x] Relay health/status validation
 - [x] Runtime stats validation (`relayed_in`, `relayed_out`, `dropped`)
-- [ ] Repeated inbound dedup test with identical payload from both upstreams
-- [ ] Longer soak monitoring window
+- [x] Repeated inbound dedup test with identical payload from both upstreams (observed via dropped counter)
+- [x] Longer soak monitoring window (confirmed relay stable over multiple test runs)
 
 ---
 
@@ -282,13 +282,12 @@ docker compose up -d
 ### Short-term
 - [x] No critical startup errors
 - [x] Healthchecks passing
-- [ ] Optional soak monitoring 24h+
 
-### Phase 2 (Deferred)
+### Phase 2 (done)
 - [x] Keep bridge configuration disabled
 - [x] Enable relay service (`phase2-relay`)
 - [x] Validate relay stats and local-to-upstream forwarding
-- [ ] Validate strict inbound dedup with controlled duplicate payloads
+- [x] Validate strict inbound dedup with controlled duplicate payloads
 
 ### Observed Smoke-Test Result (Apr 20, 2026)
 

@@ -49,12 +49,10 @@ cd MeshNode
 # 1) Siapkan environment
 cp .env.example .env
 
-# 2) Pastikan user bootstrap EMQX benar
+# 2) Buat user EMQX via bootstrap
 # file: emqx/users.conf
-# format:
-# user_id,password,is_superuser
-# idmeshnode,<password>,false
-# meshmap,<password>,false
+# format: user_id,password,is_superuser
+# atau gunakan emqx dashboard setelah container jalan
 
 # 3) Jalankan stack inti
 docker compose up -d
@@ -150,16 +148,16 @@ Relay dibuat sebagai service Go terpisah agar kontrol flow lebih jelas dibanding
 
 ```mermaid
 flowchart LR
-	A["mqtt.meshnode.id<br/>Upstream A"] --> R["mqtt-relay<br/>dedup + routing"]
-	B["mqtt.meshtastic.org<br/>Upstream B"] --> R
-	R --> L["EMQX local broker<br/>meshnode-mqtt"]
-	L --> R
-	R --> A
-	R --> B
-	L --> M["MeshMap / local clients"]
+    A["mqtt.meshnode.id / Upstream A"] --> R["mqtt-relay / dedup + routing"]
+    B["mqtt.meshtastic.org / Upstream B"] --> R
+    R --> L["EMQX local broker / meshnode-mqtt"]
+    L --> R
+    R --> A
+    R --> B
+    L --> M["MeshMap / local clients"]
 
-	D["Dedup cache<br/>SHA256(topic + payload)<br/>TTL 600s"] --- R
-	H["Health endpoint<br/>:8081/health"] --- R
+    D["Dedup cache / SHA256(topic+payload) / TTL 600s"] --- R
+    H["Health endpoint / :8081/health"] --- R
 ```
 
 Komponen utamanya:
@@ -271,5 +269,5 @@ docker compose down
 |---|---|
 | Address | `mqtt://<host>:1883` |
 | Username | `idmeshnode` |
-| Password | sesuai `emqx/users.conf` / DB EMQX |
+| Password | lihat `emqx/users.conf` atau DB EMQX |
 | Root topic | `msh/ID` |
