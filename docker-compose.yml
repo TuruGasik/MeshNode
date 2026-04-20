@@ -1,32 +1,87 @@
 services:
   meshnode-mqtt:
-    build: .
-    image: meshnode-mqtt
+    image: emqx/emqx:5.10.3
     container_name: meshnode-mqtt
     restart: unless-stopped
     environment:
-      - BRIDGE_COMMUNITY_USER=${BRIDGE_COMMUNITY_USER}
-      - BRIDGE_COMMUNITY_PASS=${BRIDGE_COMMUNITY_PASS}
-      - BRIDGE_GLOBAL_USER=${BRIDGE_GLOBAL_USER}
-      - BRIDGE_GLOBAL_PASS=${BRIDGE_GLOBAL_PASS}
-      - BRIDGE_PADANG_USER=${BRIDGE_PADANG_USER}
-      - BRIDGE_PADANG_PASS=${BRIDGE_PADANG_PASS}
+      - EMQX_NODE__NAME=emqx@127.0.0.1
+      - EMQX_NODE__DATA_DIR=/opt/emqx/data
+      - EMQX_NODE__COOKIE=meshnode-emqx-cookie-2026
+
+      - EMQX_LISTENERS__SSL__DEFAULT__BIND=0.0.0.0:8883
+      - EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__KEYFILE=/opt/emqx/certs/privkey.pem
+      - EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__CERTFILE=/opt/emqx/certs/fullchain.pem
+      - EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__VERIFY=verify_none
+      - EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__FAIL_IF_NO_PEER_CERT=false
+
+      - EMQX_AUTHENTICATION__1__BACKEND=built_in_database
+      - EMQX_AUTHENTICATION__1__MECHANISM=password_based
+      - EMQX_AUTHENTICATION__1__PASSWORD_HASH_ALGORITHM__NAME=bcrypt
+      - EMQX_AUTHENTICATION__1__USER_ID_TYPE=username
+      - EMQX_AUTHENTICATION__1__BOOTSTRAP_FILE=/opt/emqx/etc/auth-built-in-db-bootstrap.csv
+      - EMQX_AUTHENTICATION__1__BOOTSTRAP_TYPE=plain
+
+      - EMQX_AUTHORIZATION__SOURCES__1__TYPE=file
+      - EMQX_AUTHORIZATION__SOURCES__1__PATH=/opt/emqx/etc/acl.conf
+      - EMQX_AUTHORIZATION__NO_MATCH=deny
+
+      - EMQX_DASHBOARD__LISTENERS__HTTPS__BIND=18084
+      - EMQX_DASHBOARD__LISTENERS__HTTPS__SSL_OPTIONS__CERTFILE=/opt/emqx/etc/certs/cert.pem
+      - EMQX_DASHBOARD__LISTENERS__HTTPS__SSL_OPTIONS__KEYFILE=/opt/emqx/etc/certs/key.pem
+
+      - EMQX_LOG__CONSOLE__LEVEL=info
+
     ports:
       - "1883:1883"
       - "8883:8883"
     volumes:
-      - ./mosquitto/config/mosquitto.conf:/mosquitto/config/mosquitto.conf.template:ro
-      - ./mosquitto/passwd:/mosquitto/passwd:ro
-      - ./mosquitto/acl:/mosquitto/acl:ro
-      - ./mosquitto/certs:/mosquitto/certs:ro
-      - mosquitto-data:/mosquitto/data
-      - mosquitto-log:/mosquitto/log
+      - ./emqx/acl.conf:/opt/emqx/etc/acl.conf:ro
+      - ./emqx/users.conf:/opt/emqx/etc/auth-built-in-db-bootstrap.csv:ro
+      - ./emqx/base.hocon:/opt/emqx/etc/base.hocon:ro
+      - ./emqx/certs/fullchain.pem:/opt/emqx/certs/fullchain.pem:ro
+      - ./emqx/certs/privkey.pem:/opt/emqx/certs/privkey.pem:ro
+      - ./emqx/certs/fullchain.pem:/opt/emqx/etc/certs/cert.pem:ro
+      - ./emqx/certs/privkey.pem:/opt/emqx/etc/certs/key.pem:ro
+      - emqx-data:/opt/emqx/data
+      - emqx-log:/opt/emqx/log
     healthcheck:
-      test: ["CMD-SHELL", "mosquitto_sub -t '$$SYS/broker/uptime' -C 1 -W 3 -u $${BRIDGE_COMMUNITY_USER} -P $${BRIDGE_COMMUNITY_PASS} 2>/dev/null || exit 1"]
+      test: ["CMD", "emqx", "ctl", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 45s
+
+  mqtt-relay:
+    build: ./mqtt-relay
+    container_name: mqtt-relay
+    profiles:
+      - phase2-relay
+    restart: unless-stopped
+    environment:
+      - LOCAL_MQTT_HOST=${LOCAL_MQTT_HOST}
+      - LOCAL_MQTT_PORT=${LOCAL_MQTT_PORT}
+      - LOCAL_MQTT_USERNAME=${LOCAL_MQTT_USERNAME}
+      - LOCAL_MQTT_PASSWORD=${LOCAL_MQTT_PASSWORD}
+      - UPSTREAM_A_HOST=${UPSTREAM_A_HOST}
+      - UPSTREAM_A_PORT=${UPSTREAM_A_PORT}
+      - UPSTREAM_A_USERNAME=${UPSTREAM_A_USERNAME}
+      - UPSTREAM_A_PASSWORD=${UPSTREAM_A_PASSWORD}
+      - UPSTREAM_B_HOST=${UPSTREAM_B_HOST}
+      - UPSTREAM_B_PORT=${UPSTREAM_B_PORT}
+      - UPSTREAM_B_USERNAME=${UPSTREAM_B_USERNAME}
+      - UPSTREAM_B_PASSWORD=${UPSTREAM_B_PASSWORD}
+      - TOPIC_ROOT=${TOPIC_ROOT}
+      - DEDUP_TTL=${DEDUP_TTL}
+      - CLEANUP_INTERVAL=${CLEANUP_INTERVAL}
+      - LOG_LEVEL=${RELAY_LOG_LEVEL}
+    depends_on:
+      meshnode-mqtt:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f mqtt-relay || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 15s
 
   meshmap:
     build: ./meshmap
@@ -45,54 +100,19 @@ services:
       - /etc/letsencrypt/live/${TLS_DOMAIN}/fullchain.pem:/certs/fullchain.pem:ro
       - /etc/letsencrypt/live/${TLS_DOMAIN}/privkey.pem:/certs/privkey.pem:ro
       - /etc/letsencrypt/archive/${TLS_DOMAIN}:/certs/archive:ro
+    depends_on:
+      meshnode-mqtt:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/api/nodes/stats >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 30s
-    depends_on:
-      meshnode-mqtt:
-        condition: service_healthy
-
-  mqtt-relay:
-    build: ./mqtt-relay
-    container_name: mqtt-relay
-    restart: unless-stopped
-    environment:
-      - MQTT_HOST=meshnode-mqtt
-      - MQTT_PORT=1883
-      - MQTT_USERNAME=mqtt-relay
-      - MQTT_PASSWORD=${RELAY_MQTT_PASSWORD}
-      - SUBSCRIBE_TOPIC=msh/ID/#
-      - SUBSCRIBE_BRIDGE_IN=msh/bridge_in/ID/#
-      - BRIDGE_IN_PREFIX=msh/bridge_in/
-      - RELAY_PREFIX=msh/relay/
-      - SOURCE_PREFIX=msh/
-      - DEDUP_TTL=600
-      - LOG_LEVEL=INFO
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8081/health >/dev/null 2>&1 || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-    depends_on:
-      meshnode-mqtt:
-        condition: service_healthy
-
-  uptime-kuma:
-    image: louislam/uptime-kuma:2
-    container_name: uptime-kuma
-    restart: unless-stopped
-    ports:
-      - "3001:3001"
-    volumes:
-      - uptime-kuma-data:/app/data
-      - /var/run/docker.sock:/var/run/docker.sock:ro
 
 volumes:
-  mosquitto-data:
-  mosquitto-log:
-  uptime-kuma-data:
+  emqx-data:
+    driver: local
+  emqx-log:
+    driver: local
   meshmap-data:
+    driver: local

@@ -8,8 +8,14 @@ import (
 	"time"
 )
 
+// DedupEntry stores first-seen metadata for a message hash.
+type DedupEntry struct {
+	Timestamp int64
+	Source    string
+}
+
 // DedupStore is a thread-safe deduplication store using sync.Map.
-// Keys are SHA-256 hex strings, values are Unix timestamps (int64).
+// Keys are SHA-256 hex strings, values are DedupEntry.
 type DedupStore struct {
 	store sync.Map
 	ttl   time.Duration
@@ -30,26 +36,32 @@ func Hash(topic string, payload []byte) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// IsNew returns true if the hash has not been seen within the TTL window.
-// Uses LoadOrStore for atomic check-and-set to prevent race conditions
-// where two goroutines could both see "not found" simultaneously.
-func (d *DedupStore) IsNew(hash string) bool {
-	now := time.Now().Unix()
+// SeenResult returns the dedup evaluation result for a message hash.
+type SeenResult struct {
+	IsNew       bool
+	PreviousSrc string
+}
 
-	val, loaded := d.store.LoadOrStore(hash, now)
+// CheckAndStore returns whether the hash is new within the TTL window and
+// records the latest source for routing decisions.
+func (d *DedupStore) CheckAndStore(hash, source string) SeenResult {
+	now := time.Now().Unix()
+	entry := DedupEntry{Timestamp: now, Source: source}
+
+	val, loaded := d.store.LoadOrStore(hash, entry)
 	if !loaded {
-		return true // first time seeing this hash
+		return SeenResult{IsNew: true}
 	}
 
 	// Entry exists — check if it's expired
-	ts := val.(int64)
-	if now-ts >= int64(d.ttl.Seconds()) {
+	prev := val.(DedupEntry)
+	if now-prev.Timestamp >= int64(d.ttl.Seconds()) {
 		// Expired entry, refresh timestamp
-		d.store.Store(hash, now)
-		return true
+		d.store.Store(hash, entry)
+		return SeenResult{IsNew: true, PreviousSrc: prev.Source}
 	}
 
-	return false // duplicate within TTL
+	return SeenResult{IsNew: false, PreviousSrc: prev.Source}
 }
 
 // CleanupLoop periodically evicts expired hashes from the store.
@@ -65,8 +77,8 @@ func (d *DedupStore) CleanupLoop(interval time.Duration) {
 		remaining := 0
 
 		d.store.Range(func(key, value any) bool {
-			ts := value.(int64)
-			if now-ts >= ttlSec {
+			entry := value.(DedupEntry)
+			if now-entry.Timestamp >= ttlSec {
 				d.store.Delete(key)
 				evicted++
 			} else {

@@ -20,13 +20,18 @@ Berdasarkan [meshmap.net](https://github.com/brianshea2/meshmap.net) oleh Brian 
 ## Arsitektur
 ```
 docker-compose.yml
-├── meshnode-mqtt     — Mosquitto MQTT broker (bridge ke mqtt.meshtastic.org)
+├── meshnode-mqtt     — EMQX MQTT broker lokal
 ├── meshmap           — nginx + meshobserv (Go binary)
 │   ├── meshobserv    — MQTT listener, NodeDB in-memory, SQLite store, HTTP API
 │   ├── nginx         — reverse proxy (/api → :8080), TLS, static files
 │   └── website/      — frontend (Leaflet.js, css/style.css, js/app.js)
-└── mqtt-relay        — relay/dedup antar broker
+└── mqtt-relay        — relay/dedup local ↔ upstream brokers
 ```
+
+Catatan runtime saat ini:
+- `meshobserv` subscribe ke broker lokal `meshnode-mqtt`
+- upstream traffic masuk melalui `mqtt-relay`
+- dedup dilakukan sebelum pesan upstream dipublish ke broker lokal
 
 ## Build & Deploy
 ```bash

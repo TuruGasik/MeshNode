@@ -14,8 +14,6 @@ import threading
 import sys
 import os
 import hashlib
-import time
-import signal
 from datetime import datetime
 from collections import defaultdict
 import base64
@@ -261,8 +259,8 @@ _clients = []
 _clients_lock = threading.Lock()
 
 
-def monitor_all_topics():
-    """Monitor ALL topics using a SINGLE paho-mqtt client — more stable than 3 separate clients."""
+def monitor_topic(label, topic):
+    """Monitor a single topic pattern using paho-mqtt (handles binary payloads correctly)."""
     colors = {
         "BRIDGE_IN": "\033[93m",  # Yellow
         "CLEAN":     "\033[96m",  # Cyan
@@ -270,39 +268,27 @@ def monitor_all_topics():
     }
     icons    = {"BRIDGE_IN": "📥", "CLEAN": "📦", "RELAYED": "📤"}
     stat_keys = {"BRIDGE_IN": "bridge_in", "CLEAN": "clean", "RELAYED": "relayed"}
+    color    = colors.get(label, "\033[0m")
+    icon     = icons.get(label, "📦")
+    stat_key = stat_keys.get(label, "bridge_in")
     reset    = "\033[0m"
-    msg_counts = {"BRIDGE_IN": 0, "CLEAN": 0, "RELAYED": 0}
-
-    def label_from_topic(topic):
-        """Determine which namespace a topic belongs to."""
-        if topic.startswith("msh/bridge_in/"):
-            return "BRIDGE_IN"
-        elif topic.startswith("msh/relay/"):
-            return "RELAYED"
-        else:
-            return "CLEAN"
+    msg_count = [0]
 
     def on_connect(client, userdata, flags, reason_code, properties):
         if reason_code.is_failure:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Connect failed: {reason_code}")
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ {label} connect failed: {reason_code}")
         else:
-            for label, topic in TOPICS.items():
-                client.subscribe(topic, qos=0)
-                print(f"  ✅ Subscribed: {topic}")
+            client.subscribe(topic, qos=0)
 
     def on_disconnect(client, userdata, flags, reason_code, properties):
         if reason_code.value != 0:
-            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] ⚠️  Disconnected ({reason_code}), reconnecting…")
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️  {label} disconnected ({reason_code}), reconnecting…")
 
     def on_message(client, userdata, message):
         timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        msg_topic = message.topic
-        msg_payload_bytes = message.payload
+        msg_topic       = message.topic
+        msg_payload_bytes = message.payload  # bytes — no newline splitting!
 
-        label = label_from_topic(msg_topic)
-        color = colors.get(label, "\033[0m")
-        icon = icons.get(label, "📦")
-        stat_key = stat_keys.get(label, "bridge_in")
         subtopic = get_subtopic(msg_topic)
         h = short_hash(msg_topic, msg_payload_bytes)
 
@@ -310,7 +296,7 @@ def monitor_all_topics():
             stats[stat_key] += 1
             per_subtopic[subtopic][stat_key] += 1
 
-        msg_counts[label] += 1
+        msg_count[0] += 1
         display_payload = decode_payload(msg_topic, msg_payload_bytes)
 
         print(
@@ -320,48 +306,37 @@ def monitor_all_topics():
             f"│ {display_payload}"
         )
 
-        total = msg_counts["BRIDGE_IN"] + msg_counts["CLEAN"] + msg_counts["RELAYED"]
-        if total % 30 == 0:
+        if msg_count[0] % 30 == 0:
             print_stats()
 
     try:
         try:
             client = paho_mqtt.Client(
                 callback_api_version=paho_mqtt.CallbackAPIVersion.VERSION2,
-                client_id=f"monitor-relay-{os.getpid()}"
+                client_id=f"monitor-{label.lower()}-{os.getpid()}"
             )
         except (AttributeError, TypeError):
-            client = paho_mqtt.Client(client_id=f"monitor-relay-{os.getpid()}")
+            client = paho_mqtt.Client(client_id=f"monitor-{label.lower()}-{os.getpid()}")
 
         if BROKER["user"] and BROKER["pass"]:
             client.username_pw_set(BROKER["user"], BROKER["pass"])
-        client.on_connect = on_connect
+        client.on_connect    = on_connect
         client.on_disconnect = on_disconnect
-        client.on_message = on_message
+        client.on_message    = on_message
         client.reconnect_delay_set(min_delay=1, max_delay=30)
         client.connect(BROKER["host"], BROKER["port"], keepalive=60)
         with _clients_lock:
             _clients.append(client)
-
-        # Use loop_start() for non-blocking reconnect, then block with signal.pause()
-        client.loop_start()
-        signal.pause()
-
-    except Exception as e:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Error: {e}")
-    finally:
+        client.loop_forever()
         with _clients_lock:
-            for c in _clients:
-                try:
-                    c.loop_stop()
-                    c.disconnect()
-                except Exception:
-                    pass
-            _clients.clear()
+            _clients.remove(client)
+    except Exception as e:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ {label} error: {e}")
 
 
 def stats_printer():
     """Print stats periodically"""
+    import time
     while True:
         time.sleep(30)
         with stats_lock:
@@ -394,24 +369,45 @@ def main():
     print("\033[1m" + "=" * 70 + "\033[0m")
     print()
 
-    # Single client monitors ALL topics — more stable than 3 separate clients
-    t1 = threading.Thread(target=monitor_all_topics)
+    threads = []
+
+    # Monitor raw bridge inbound
+    t1 = threading.Thread(
+        target=monitor_topic, args=("BRIDGE_IN", TOPICS["BRIDGE_IN"])
+    )
     t1.daemon = True
     t1.start()
+    threads.append(t1)
 
-    # Periodic stats
-    t2 = threading.Thread(target=stats_printer)
+    # Monitor clean deduped
+    t2 = threading.Thread(
+        target=monitor_topic, args=("CLEAN", TOPICS["CLEAN"])
+    )
     t2.daemon = True
     t2.start()
+    threads.append(t2)
+
+    # Monitor outbound relay
+    t3 = threading.Thread(
+        target=monitor_topic, args=("RELAYED", TOPICS["RELAYED"])
+    )
+    t3.daemon = True
+    t3.start()
+    threads.append(t3)
+
+    # Periodic stats
+    t4 = threading.Thread(target=stats_printer)
+    t4.daemon = True
+    t4.start()
 
     try:
-        t1.join()
+        for t in threads:
+            t.join()
     except KeyboardInterrupt:
         print()
         with _clients_lock:
             for c in _clients:
                 try:
-                    c.loop_stop()
                     c.disconnect()
                 except Exception:
                     pass

@@ -254,8 +254,6 @@ func main() {
 		Topics: []string{
 			"msh/ID/2/map/",
 			"msh/ID/2/e/+/+",
-			"msh/ID_923/2/map/",
-			"msh/ID_923/2/e/+/+",
 		},
 		TopicRegex: regexp.MustCompile(`^msh(?:/[^/]+)+/2/(?:e/[^/]+/![0-9a-f]+|map/)$`),
 		Accept: func(from uint32) bool {

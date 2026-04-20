@@ -1,11 +1,9 @@
-mosquitto/data/
-mosquitto/log/
-mosquitto/certs/
-mosquitto/passwd
+emqx/*
 deploy_certs.sh
 meshmap/data/
 .env
+.env.*
+!.env.example
 docs/
 mqtt-relay/mqtt-relay
-migrasi/
 *.db

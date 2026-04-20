@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync/atomic"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
@@ -12,6 +11,9 @@ import (
 // Stats tracks relay statistics using atomic counters (zero lock overhead).
 type Stats struct {
 	Received   atomic.Int64
+	FromLocal  atomic.Int64
+	FromUpA    atomic.Int64
+	FromUpB    atomic.Int64
 	RelayedIn  atomic.Int64
 	RelayedOut atomic.Int64
 	Dropped    atomic.Int64
@@ -20,12 +22,26 @@ type Stats struct {
 // String returns a formatted stats summary.
 func (s *Stats) String() string {
 	return fmt.Sprintf(
-		"received: %d | relayed_in: %d | relayed_out: %d | dropped: %d",
+		"received: %d | from_local: %d | from_up_a: %d | from_up_b: %d | relayed_in: %d | relayed_out: %d | dropped: %d",
 		s.Received.Load(),
+		s.FromLocal.Load(),
+		s.FromUpA.Load(),
+		s.FromUpB.Load(),
 		s.RelayedIn.Load(),
 		s.RelayedOut.Load(),
 		s.Dropped.Load(),
 	)
+}
+
+const (
+	sourceLocal = "local"
+	sourceUpA   = "upstream_a"
+	sourceUpB   = "upstream_b"
+)
+
+type publishTarget struct {
+	client mqtt.Client
+	label  string
 }
 
 // Relay handles MQTT message routing and deduplication.
@@ -34,6 +50,9 @@ type Relay struct {
 	dedup     *DedupStore
 	stats     *Stats
 	onMessage func() // callback for health tracking
+	local     mqtt.Client
+	upA       mqtt.Client
+	upB       mqtt.Client
 }
 
 // NewRelay creates a new Relay instance.
@@ -46,97 +65,123 @@ func NewRelay(cfg *Config, dedup *DedupStore, onMessage func()) *Relay {
 	}
 }
 
-// HandleMessage is the MQTT on_message callback.
-// It determines direction (IN/OUT), computes canonical hash,
-// checks dedup, and publishes to the appropriate relay topic.
-//
-// Flow (identical to Python relay.py):
-//
-//	msg received
-//	  → skip if topic starts with RELAY_PREFIX (anti self-loop)
-//	  → stats.Received++
-//	  → determine direction:
-//	      IN  = topic starts with BRIDGE_IN_PREFIX (from bridge)
-//	      OUT = topic starts with SOURCE_PREFIX (from local client)
-//	  → compute canonical topic (strip bridge_in/ for IN direction)
-//	  → hash = SHA256(canonical + payload)
-//	  → if dedup.IsNew(hash):
-//	      IN  → publish to canonical topic (clean, for local clients)
-//	      OUT → publish to RELAY_PREFIX + subtopic (for bridge outbound)
-//	  → else:
-//	      drop (duplicate)
-func (r *Relay) HandleMessage(client mqtt.Client, msg mqtt.Message) {
+// SetClients wires the connected MQTT clients into the relay.
+func (r *Relay) SetClients(local, upA, upB mqtt.Client) {
+	r.local = local
+	r.upA = upA
+	r.upB = upB
+}
+
+// HandleLocalMessage processes messages originating from the local broker.
+func (r *Relay) HandleLocalMessage(_ mqtt.Client, msg mqtt.Message) {
+	r.handleMessage(sourceLocal, msg)
+}
+
+// HandleUpstreamAMessage processes messages originating from upstream A.
+func (r *Relay) HandleUpstreamAMessage(_ mqtt.Client, msg mqtt.Message) {
+	r.handleMessage(sourceUpA, msg)
+}
+
+// HandleUpstreamBMessage processes messages originating from upstream B.
+func (r *Relay) HandleUpstreamBMessage(_ mqtt.Client, msg mqtt.Message) {
+	r.handleMessage(sourceUpB, msg)
+}
+
+func (r *Relay) handleMessage(source string, msg mqtt.Message) {
 	topic := msg.Topic()
 	payload := msg.Payload()
 
-	// Skip messages on the relay prefix to prevent self-loop on outbound
-	if strings.HasPrefix(topic, r.config.RelayPrefix) {
-		return
-	}
-
 	r.stats.Received.Add(1)
+	switch source {
+	case sourceLocal:
+		r.stats.FromLocal.Add(1)
+	case sourceUpA:
+		r.stats.FromUpA.Add(1)
+	case sourceUpB:
+		r.stats.FromUpB.Add(1)
+	}
 	if r.onMessage != nil {
 		r.onMessage()
 	}
 
-	// ---------------------------------------------------------------
-	// Determine direction and canonical topic
-	// ---------------------------------------------------------------
-	var canonical string
-	var direction string
-
-	if strings.HasPrefix(topic, r.config.BridgeInPrefix) {
-		// INBOUND: from bridge (msh/bridge_in/ID/...) → clean topic
-		// Canonical: strip bridge_in/ → msh/ID/...
-		canonical = r.config.SourcePrefix + topic[len(r.config.BridgeInPrefix):]
-		direction = "IN"
-	} else if strings.HasPrefix(topic, r.config.SourcePrefix) {
-		// OUTBOUND: from local client on msh/ID/... OR relay's own
-		// inbound publish (self-echo). Dedup handles both:
-		//   - Local client msg: hash is new → relay to msh/relay/...
-		//   - Self-echo: hash already cached from INBOUND → dropped
-		canonical = topic // already in canonical form (msh/ID/...)
-		direction = "OUT"
-	} else {
+	if topic == "" || !r.config.TopicMatcher(topic) {
 		slog.Warn("Ignoring message on unexpected topic", "topic", topic)
 		return
 	}
 
-	// ---------------------------------------------------------------
-	// Dedup using canonical hash
-	// ---------------------------------------------------------------
-	msgHash := Hash(canonical, payload)
-
-	if r.dedup.IsNew(msgHash) {
-		var relayTopic string
-
-		if direction == "IN" {
-			// Bridge inbound → publish to clean topic for local clients
-			relayTopic = canonical
-			r.stats.RelayedIn.Add(1)
-		} else {
-			// Local client → publish to relay topic for bridge outbound
-			relayTopic = r.config.RelayPrefix + topic[len(r.config.SourcePrefix):]
-			r.stats.RelayedOut.Add(1)
-		}
-
-		client.Publish(relayTopic, 0, false, payload)
-
-		slog.Debug("RELAY",
-			"dir", direction,
-			"from", topic,
-			"to", relayTopic,
-			"bytes", len(payload),
-			"hash", msgHash[:12],
-		)
-	} else {
+	msgHash := Hash(topic, payload)
+	seen := r.dedup.CheckAndStore(msgHash, source)
+	targets, direction := r.targetsFor(source, seen)
+	if len(targets) == 0 {
 		r.stats.Dropped.Add(1)
-
 		slog.Debug("DROP",
 			"dir", direction,
 			"topic", topic,
 			"bytes", len(payload),
+			"source", source,
+			"previous_source", seen.PreviousSrc,
 			"hash", msgHash[:12],
 		)
+		return
+	}
+
+	for _, target := range targets {
+		token := target.client.Publish(topic, 0, false, payload)
+		token.Wait()
+		if err := token.Error(); err != nil {
+			slog.Warn("Publish failed",
+				"dir", direction,
+				"topic", topic,
+				"target", target.label,
+				"error", err,
+			)
+			continue
+		}
+	}
+
+	if source == sourceLocal {
+		r.stats.RelayedOut.Add(int64(len(targets)))
+	} else {
+		r.stats.RelayedIn.Add(1)
+	}
+
+	slog.Debug("RELAY",
+		"dir", direction,
+		"from", source,
+		"to_count", len(targets),
+		"topic", topic,
+		"bytes", len(payload),
+		"hash", msgHash[:12],
+	)
+	if seen.IsNew {
+		return
+	}
+}
+
+func (r *Relay) targetsFor(source string, seen SeenResult) ([]publishTarget, string) {
+	connected := func(client mqtt.Client) bool {
+		return client != nil && client.IsConnected()
+	}
+
+	switch source {
+	case sourceLocal:
+		var targets []publishTarget
+		if connected(r.upA) {
+			targets = append(targets, publishTarget{client: r.upA, label: sourceUpA})
+		}
+		if connected(r.upB) {
+			targets = append(targets, publishTarget{client: r.upB, label: sourceUpB})
+		}
+		return targets, "OUT"
+	case sourceUpA, sourceUpB:
+		if !connected(r.local) {
+			return nil, "IN"
+		}
+		if !seen.IsNew {
+			return nil, "IN"
+		}
+		return []publishTarget{{client: r.local, label: sourceLocal}}, "IN"
+	default:
+		return nil, "UNKNOWN"
 	}
 }

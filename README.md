@@ -1,185 +1,275 @@
 # MeshNode
-MeshNode Indonesia MQTT and Map
 
-A Mosquitto MQTT broker for Indonesian Meshtastic users with bridges to the Indonesian community server and the global Meshtastic MQTT server, plus a self-hosted [MeshMap](https://github.com/brianshea2/meshmap.net) that shows nodes on an interactive map.
+MeshNode Indonesia stack berbasis **EMQX + MeshMap** untuk jaringan Meshtastic.
 
-## Architecture Overview
+## Status Arsitektur Saat Ini
 
-Local Meshtastic clients use the **standard topic `msh/ID/#`** — same as everyone else. Anti-echo and deduplication are handled transparently by the relay service using SHA-256 hashing.
+### Phase 1 (aktif)
+- ✅ EMQX broker (`meshnode-mqtt`)
+- ✅ ACL file-based
+- ✅ TLS MQTT (`8883`)
+- ✅ EMQX Dashboard HTTP (`18083`) + HTTPS (`18084`)
+- ✅ MeshMap (`meshmap`)
 
-The system uses **three internal namespaces** to prevent echo loops:
+### Phase 2 (aktif, opsional via profile)
+- ✅ `mqtt-relay` deduplication (profile `phase2-relay`)
+- ✅ Upstream integration via relay multi-broker
+- ✅ EMQX bridge config tetap ada tapi disabled
 
-1. **`msh/ID/#`** — Standard message namespace
-   - Local clients publish AND subscribe here
-   - Relay publishes deduplicated inbound messages here
-   - Relay also subscribes here (self-echo handled by dedup)
+## Topik MQTT
 
-2. **`msh/bridge_in/ID/#`** — Bridge inbound namespace
-   - External bridges publish raw inbound messages here
-   - Only the relay service subscribes to this namespace
+- Namespace utama: `msh/ID/#`
 
-3. **`msh/relay/ID/#`** — Bridge outbound namespace
-   - Relay publishes outbound messages here (from local clients)
-   - Bridges pick up messages from here to send externally
+Saat relay aktif, topik `msh/ID/#` dipakai di:
+- broker lokal `meshnode-mqtt`
+- upstream `mqtt.meshnode.id`
+- upstream `mqtt.meshtastic.org`
 
-## Bridges
+## Struktur Folder Penting
 
-| Connection | Server | Username |
-|---|---|---|
-| Indonesian Community | `mqtt.meshnode.id` | `idmeshnode` |
-| Global Meshtastic | `mqtt.meshtastic.org` | `meshdev` |
-| Padang | `103.141.75.100` | `meshnodeid` |
+- `docker-compose.yml` → stack aktif
+- `emqx/acl.conf` → ACL runtime EMQX
+- `emqx/users.conf` → bootstrap user EMQX (CSV)
+- `emqx/certs/` → TLS cert/key (`fullchain.pem`, `privkey.pem`)
+- `meshmap/` → source + Docker build MeshMap
+- `mqtt-relay/` → source relay multi-broker + dedup
+- `migrasi/` → dokumen migration plan/history
 
-All bridges are configured to:
-- **Inbound**: Remote `msh/ID/#` → Local `msh/bridge_in/ID/#`
-- **Outbound**: Local `msh/relay/ID/#` → Remote `msh/ID/#`
+## Requirement
 
-The relay service processes messages from both `msh/ID/#` (local clients) and `msh/bridge_in/ID/#` (bridge inbound), performs SHA-256 deduplication, and routes them accordingly.
-
-### 🛡️ MQTT Relay & Deduplication (Go Subsystem)
-
-Since multiple bridges send the same Meshtastic network traffic from remote servers, a specialized **MQTT Relay service (written in Go)** operates as a sidecar to the local broker. 
-- **Anti-Echo Loop**: Prevents identical messages from bouncing between local nodes, bridges, and external servers through a combination of namespace separation (bridges use `bridge_in/` and `relay/`) and SHA-256 dedup (self-echo and cross-direction echo are automatically dropped).
-- **De-duplication**: Filters out duplicate messages received from the 3 independent bridges down to a single canonical copy. Also prevents local client messages from echoing back via external servers.
-- **High Performance**: Designed entirely in Golang utilizing a lock-free `sync.Map` hash cache and goroutines to process up to 50,000 req/s out of the box with <15MB RAM usage.
-
-## Health Monitoring
-
-[Uptime Kuma](https://github.com/louislam/uptime-kuma) is included as a self-hosted health monitor.  
-It runs on port **3001** and lets you track the broker and both bridge connections from a web dashboard.
-
-### Recommended monitors
-
-After opening the dashboard (`http://<your-host>:3001`) and creating an admin account, add the following monitors:
-
-| Name | Type | Host / URL | Port / Topic |
-|---|---|---|---|
-| Local MQTT Broker | TCP Port | `meshnode-mqtt` (or `localhost`) | `1883` |
-| Bridge – Indonesian Community | TCP Port | `mqtt.meshnode.id` | `1883` |
-| Bridge – Global Meshtastic | TCP Port | `mqtt.meshtastic.org` | `1883` |
-| Bridge – Padang | TCP Port | `103.141.75.100` | `1883` |
-| MeshMap | HTTP(s) | `https://<your-domain>` (or `http://localhost`) | — |
-
-> **Tip – MQTT monitor type:** Uptime Kuma also has a native **MQTT** monitor.  
-> Use it to verify that messages are actually flowing through a bridge:  
-> set the broker URL to `mqtt://localhost:1883`, subscribe to `msh/ID/#`,  
-> and configure the expected keyword/value your nodes publish.
-
-## MeshMap (Node Map)
-
-A self-hosted deployment of [meshmap.net](https://github.com/brianshea2/meshmap.net) that connects to the local MQTT broker and displays Meshtastic nodes on an interactive web map.
-
-### Setup
-
-The MeshMap service needs an MQTT user to subscribe to messages on the local broker.  
-Create the user before starting the stack for the first time:
-
-```bash
-# Run from the MeshNode directory – creates (or updates) a "meshmap" user
-docker run --rm -v "$(pwd)/mosquitto/passwd:/mosquitto/passwd" \
-  eclipse-mosquitto:2 mosquitto_passwd -b /mosquitto/passwd meshmap meshmap
-```
-
-> **Note:** If you choose a different username or password, update the `MQTT_USERNAME` / `MQTT_PASSWORD`
-> environment variables in `docker-compose.yml` to match.
-
-### Access
-
-Open `https://<your-domain>` (port **80** / **443**) to view the node map.  
-Multiple domains can be served from the same instance — e.g. `map.dari.asia` and `map.meshnode.id` both point to the same map and API.
-
-### Environment variables (MeshMap)
-
-| Variable | Default | Description |
-|---|---|---|
-| `MQTT_BROKER` | `tcp://meshnode-mqtt:1883` | MQTT broker URL |
-| `MQTT_USERNAME` | `meshmap` | MQTT username |
-| `MQTT_PASSWORD` | `meshmap` | MQTT password |
-
-### Environment variables (MQTT Relay)
-
-| Variable | Default | Description |
-|---|---|---|
-| `MQTT_HOST` | `meshnode-mqtt` | MQTT broker hostname |
-| `MQTT_PORT` | `1883` | MQTT broker port |
-| `MQTT_USERNAME` | `mqtt-relay` | MQTT username for relay |
-| `MQTT_PASSWORD` | (from `.env`) | MQTT password for relay |
-| `SUBSCRIBE_TOPIC` | `msh/ID/#` | Standard message topic (local clients + relay self-echo) |
-| `SUBSCRIBE_BRIDGE_IN` | `msh/bridge_in/ID/#` | Bridge inbound topic |
-| `BRIDGE_IN_PREFIX` | `msh/bridge_in/` | Prefix for bridge inbound topics |
-| `RELAY_PREFIX` | `msh/relay/` | Prefix for outbound relay topics |
-| `SOURCE_PREFIX` | `msh/` | Canonical topic prefix |
-| `DEDUP_TTL` | `600` | Deduplication TTL in seconds |
-| `LOG_LEVEL` | `INFO` | Log level (DEBUG/INFO/WARN/ERROR) |
-
-## Requirements
-
-- [Docker](https://docs.docker.com/get-docker/)
-- [Docker Compose](https://docs.docker.com/compose/install/)
+- Docker
+- Docker Compose
 
 ## Quick Start
 
 ```bash
-# Clone the repository
 git clone https://github.com/TuruGasik/MeshNode.git
 cd MeshNode
 
-# Copy and edit the environment file
+# 1) Siapkan environment
 cp .env.example .env
-# Edit .env with your credentials (bridge usernames/passwords, TLS domain, etc.)
 
-# Create MQTT users for meshmap and mqtt-relay
-docker run --rm -v "$(pwd)/mosquitto/passwd:/mosquitto/passwd" \
-  eclipse-mosquitto:2 mosquitto_passwd -b /mosquitto/passwd meshmap <your-meshmap-password>
-docker run --rm -v "$(pwd)/mosquitto/passwd:/mosquitto/passwd" \
-  eclipse-mosquitto:2 mosquitto_passwd -b /mosquitto/passwd mqtt-relay <your-relay-password>
+# 2) Pastikan user bootstrap EMQX benar
+# file: emqx/users.conf
+# format:
+# user_id,password,is_superuser
+# idmeshnode,<password>,false
+# meshmap,<password>,false
 
-# Start all services
+# 3) Jalankan stack inti
 docker compose up -d
 
-# Check logs
-docker compose logs -f
+# 4) Aktifkan relay jika ingin integrasi upstream
+docker compose --profile phase2-relay up -d mqtt-relay
+
+# 5) Cek status
+docker compose ps
 ```
 
-- MQTT broker → port **1883**
-- MQTT broker (TLS) → port **8883**
-- MeshMap (node map) → port **80** / **443** (`https://<your-domain>`)
-- Uptime Kuma dashboard → port **3001** (`http://<your-host>:3001`)
+## Akses Service
 
-## Configuration
+- MQTT: `1883`
+- MQTT TLS: `8883`
+- EMQX Dashboard HTTP: `http://<host>:18083`
+- EMQX Dashboard HTTPS: `https://<host>:18084`
+- MeshMap: `https://<domain>` (ports `80/443`)
 
-The Mosquitto configuration is located at `mosquitto/config/mosquitto.conf`.  
-Persistent data and logs are stored in Docker named volumes (`mosquitto-data`, `mosquitto-log`, `uptime-kuma-data`, `meshmap-data`).
+## Catatan Dashboard EMQX
 
-### Local secrets / files to keep out of git
+- User default dashboard: `admin`
+- Password admin harus diganti setelah deploy awal.
+- Reset password admin via CLI container:
 
-- `mosquitto/passwd`
-- `mosquitto/certs/`
-- `deploy_certs.sh` (local environment script with domain/path specific values)
+```bash
+docker exec meshnode-mqtt emqx ctl admins passwd admin '<new-password>'
+```
 
-### Optional helper scripts
+## TLS Certificate Deployment
 
-- `scripts/monitor_mosquitto_tls.sh` — monitors Docker logs and prints TLS (`8883`) client connection events.
-- `scripts/monitor_mqtt.py` — monitors multiple MQTT servers simultaneously (LOCAL, COMMUNITY, PADANG).
-- `scripts/monitor_mqtt_relay.py` — monitors the relay dedup pipeline (bridge_in vs clean vs relayed) with stats.
+Script helper:
 
-> **Note:** The monitoring scripts read credentials from environment variables (`MONITOR_LOCAL_USER`, etc.).
-> See `.env.example` for the full list. Run with: `source .env && python3 scripts/monitor_mqtt.py`
+```bash
+./deploy_certs.sh
+```
 
-## Stopping
+Script ini akan:
+- copy cert LetsEncrypt ke `emqx/certs/`
+- set permission yang cocok untuk user `emqx` di container
+- restart `meshnode-mqtt` dan `meshmap`
+
+## Konfigurasi ACL
+
+File: `emqx/acl.conf`
+
+Contoh rule aktif saat ini:
+- `idmeshnode`: full access ke `msh/ID/#`
+- `meshmap`: subscribe only ke `msh/ID/#`
+- `mqtt-relay`: subscribe/publish ke `msh/ID/#`
+- default: deny
+
+Setelah ubah ACL, apply dengan:
+
+```bash
+docker compose restart meshnode-mqtt
+```
+
+## Monitoring Scripts
+
+- `scripts/monitor_mqtt.py` → monitor multi-broker
+- `scripts/monitor_mqtt_relay.py` → monitor pipeline relay/dedup (Phase 2)
+
+Jalankan dengan env dari `.env`:
+
+```bash
+source .env
+python3 scripts/monitor_mqtt.py
+```
+
+## Phase 2 (Relay)
+
+`mqtt-relay` menangani koneksi ke dua upstream dan dedup traffic inbound. Aktifkan saat siap:
+
+```bash
+docker compose --profile phase2-relay up -d mqtt-relay
+```
+
+Health check relay:
+
+```bash
+docker exec mqtt-relay wget -qO- http://127.0.0.1:8081/health
+```
+
+Flow saat relay aktif:
+- local `meshnode-mqtt` → relay → 2 upstream
+- upstream A/B → relay → local `meshnode-mqtt`
+- duplicate inbound dibuang oleh dedup cache
+
+### Detail Arsitektur `mqtt-relay`
+
+Relay dibuat sebagai service Go terpisah agar kontrol flow lebih jelas dibanding mengandalkan bridge logic broker.
+
+```mermaid
+flowchart LR
+	A[mqtt.meshnode.id<br/>Upstream A] --> R[mqtt-relay<br/>dedup + routing]
+	B[mqtt.meshtastic.org<br/>Upstream B] --> R
+	R --> L[EMQX local broker<br/>meshnode-mqtt]
+	L --> R
+	R --> A
+	R --> B
+	L --> M[MeshMap / local clients]
+
+	D[(Dedup cache<br/>SHA256(topic + payload)<br/>TTL 600s)] --- R
+	H[/Health endpoint<br/>:8081/health/] --- R
+```
+
+Komponen utamanya:
+- **1 koneksi broker lokal**: `meshnode-mqtt`
+- **2 koneksi upstream**:
+	- `mqtt.meshnode.id`
+	- `mqtt.meshtastic.org`
+- **1 dedup cache in-memory** dengan TTL
+- **1 health endpoint** di `:8081/health`
+
+Semua koneksi subscribe ke root topic yang sama:
+- `msh/ID/#`
+
+Jadi relay bekerja di atas **namespace kanonik yang sama** untuk local dan semua upstream, bukan dengan namespace bridge buatan.
+
+### Cara Kerja Dedup
+
+Untuk setiap pesan, relay membuat fingerprint:
+
+- `SHA256(topic + payload)`
+
+Hash ini disimpan di cache beserta metadata:
+- waktu pertama terlihat
+- sumber pesan (`local`, `upstream_a`, `upstream_b`)
+
+Aturan sederhananya:
+- jika pesan **baru dari local** → teruskan ke kedua upstream
+- jika pesan **baru dari upstream** → teruskan ke local broker
+- jika hash **sudah pernah ada dalam window TTL** → anggap duplicate/echo dan drop
+
+TTL default saat ini:
+- `DEDUP_TTL=600` detik
+
+Cleanup cache berjalan periodik dengan:
+- `CLEANUP_INTERVAL=60` detik
+
+### Kenapa Model Ini Dipakai
+
+Keuntungan pendekatan ini:
+- **anti-loop lebih mudah dipahami**
+- **duplicate dari 2 upstream bisa dibuang**
+- **EMQX tetap sederhana** sebagai broker lokal
+- **debugging lebih gampang** lewat stats dan health endpoint
+- **routing bisa diubah di code**, tidak perlu memaksa rule/bridge config broker
+
+### Statistik Runtime Relay
+
+Relay expose statistik internal yang berguna untuk observability:
+
+- `received` → total pesan yang diterima relay
+- `from_local` → pesan yang datang dari broker lokal
+- `from_up_a` → pesan dari upstream A
+- `from_up_b` → pesan dari upstream B
+- `relayed_in` → pesan upstream yang diteruskan ke local
+- `relayed_out` → pesan local yang diteruskan ke upstream
+- `dropped` → duplicate/echo yang dibuang
+- `cache_size` → jumlah hash aktif di dedup cache
+
+Interpretasi cepat:
+- `relayed_in` naik → upstream ke local berjalan
+- `relayed_out` naik → local ke upstream berjalan
+- `dropped` naik → dedup aktif bekerja
+
+### Health Check dan Monitoring
+
+Cek health JSON:
+
+```bash
+docker exec mqtt-relay wget -qO- http://127.0.0.1:8081/health
+```
+
+Lihat log relay:
+
+```bash
+docker compose logs --tail=120 mqtt-relay
+```
+
+Monitor pipeline relay secara live:
+
+```bash
+source .env
+python3 scripts/monitor_mqtt_relay.py
+```
+
+### Status Validasi Saat Ini
+
+Yang sudah tervalidasi:
+- relay connect ke broker lokal
+- relay connect ke 2 upstream
+- publish lokal berhasil diteruskan ke 2 upstream
+- stats `relayed_in`, `relayed_out`, dan `dropped` bergerak konsisten
+- health endpoint status `healthy`
+
+Artinya runtime saat ini sudah memenuhi model:
+
+- **upstream → local**
+- **local → upstream**
+- **duplicate inbound dibuang oleh dedup cache**
+
+## Stop Stack
 
 ```bash
 docker compose down
 ```
 
-### Konfigurasi Meshtastic Client
+## Konfigurasi Meshtastic Client
 
 | Parameter | Nilai |
 |---|---|
-| **Address** | `mqtt://kemplu.dari.asia:1883` |
-| **Username** | `idmeshnode` |
-| **Password** | `node4all` |
-| **Root topic** | `msh/ID` |
-
-> **Note:** Root topic menggunakan `msh/ID` — standard topic yang sama dengan semua user Meshtastic lainnya.
-> Anti-echo loop ditangani secara otomatis oleh relay dedup service.
+| Address | `mqtt://<host>:1883` |
+| Username | `idmeshnode` |
+| Password | sesuai `emqx/users.conf` / DB EMQX |
+| Root topic | `msh/ID` |

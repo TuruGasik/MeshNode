@@ -20,36 +20,52 @@ import (
 // Config holds all configuration loaded from environment variables.
 // 100% compatible with the Python relay.py env vars.
 type Config struct {
-	MQTTHost          string
-	MQTTPort          int
-	MQTTUsername      string
-	MQTTPassword      string
-	SubscribeTopic    string // e.g. "msh/ID/#" — local client + relay self-echo
-	SubscribeBridgeIn string // e.g. "msh/bridge_in/ID/#" — raw bridge inbound
-	RelayPrefix       string // e.g. "msh/relay/" — outbound to bridges
-	SourcePrefix      string // e.g. "msh/" — canonical topic prefix
-	BridgeInPrefix    string // e.g. "msh/bridge_in/" — bridge inbound prefix
-	DedupTTL          int    // seconds
-	CleanupInterval   int    // seconds
-	LogLevel          string
+	LocalBrokerHost     string
+	LocalBrokerPort     int
+	LocalBrokerUsername string
+	LocalBrokerPassword string
+	UpstreamABrokerHost string
+	UpstreamABrokerPort int
+	UpstreamABrokerUser string
+	UpstreamABrokerPass string
+	UpstreamBBrokerHost string
+	UpstreamBBrokerPort int
+	UpstreamBBrokerUser string
+	UpstreamBBrokerPass string
+	TopicRoot           string
+	DedupTTL            int
+	CleanupInterval     int
+	LogLevel            string
 }
 
 // LoadConfig reads configuration from environment variables with defaults.
 func LoadConfig() *Config {
 	return &Config{
-		MQTTHost:          getEnv("MQTT_HOST", "meshnode-mqtt"),
-		MQTTPort:          getEnvInt("MQTT_PORT", 1883),
-		MQTTUsername:      getEnv("MQTT_USERNAME", "mqtt-relay"),
-		MQTTPassword:      getEnv("MQTT_PASSWORD", ""),
-		SubscribeTopic:    getEnv("SUBSCRIBE_TOPIC", "msh/ID/#"),
-		SubscribeBridgeIn: getEnv("SUBSCRIBE_BRIDGE_IN", "msh/bridge_in/ID/#"),
-		RelayPrefix:       getEnv("RELAY_PREFIX", "msh/relay/"),
-		SourcePrefix:      getEnv("SOURCE_PREFIX", "msh/"),
-		BridgeInPrefix:    getEnv("BRIDGE_IN_PREFIX", "msh/bridge_in/"),
-		DedupTTL:          getEnvInt("DEDUP_TTL", 600),
-		CleanupInterval:   getEnvInt("CLEANUP_INTERVAL", 60),
-		LogLevel:          getEnv("LOG_LEVEL", "INFO"),
+		LocalBrokerHost:     getEnv("LOCAL_MQTT_HOST", "meshnode-mqtt"),
+		LocalBrokerPort:     getEnvInt("LOCAL_MQTT_PORT", 1883),
+		LocalBrokerUsername: getEnv("LOCAL_MQTT_USERNAME", "mqtt-relay"),
+		LocalBrokerPassword: getEnv("LOCAL_MQTT_PASSWORD", ""),
+		UpstreamABrokerHost: getEnv("UPSTREAM_A_HOST", "mqtt.meshnode.id"),
+		UpstreamABrokerPort: getEnvInt("UPSTREAM_A_PORT", 1883),
+		UpstreamABrokerUser: getEnv("UPSTREAM_A_USERNAME", "idmeshnode"),
+		UpstreamABrokerPass: getEnv("UPSTREAM_A_PASSWORD", "Mesh4all"),
+		UpstreamBBrokerHost: getEnv("UPSTREAM_B_HOST", "mqtt.meshtastic.org"),
+		UpstreamBBrokerPort: getEnvInt("UPSTREAM_B_PORT", 1883),
+		UpstreamBBrokerUser: getEnv("UPSTREAM_B_USERNAME", "meshdev"),
+		UpstreamBBrokerPass: getEnv("UPSTREAM_B_PASSWORD", "large4cats"),
+		TopicRoot:           getEnv("TOPIC_ROOT", "msh/ID/#"),
+		DedupTTL:            getEnvInt("DEDUP_TTL", 600),
+		CleanupInterval:     getEnvInt("CLEANUP_INTERVAL", 60),
+		LogLevel:            getEnv("LOG_LEVEL", "INFO"),
 	}
+}
+
+func (c *Config) TopicMatcher(topic string) bool {
+	if strings.HasSuffix(c.TopicRoot, "/#") {
+		prefix := strings.TrimSuffix(c.TopicRoot, "#")
+		return strings.HasPrefix(topic, prefix)
+	}
+	return topic == c.TopicRoot
 }
 
 func getEnv(key, fallback string) string {
@@ -128,6 +144,9 @@ func (h *HealthState) Status() map[string]any {
 		}(),
 		"stats": map[string]int64{
 			"received":    h.stats.Received.Load(),
+			"from_local":  h.stats.FromLocal.Load(),
+			"from_up_a":   h.stats.FromUpA.Load(),
+			"from_up_b":   h.stats.FromUpB.Load(),
 			"relayed_in":  h.stats.RelayedIn.Load(),
 			"relayed_out": h.stats.RelayedOut.Load(),
 			"dropped":     h.stats.Dropped.Load(),
@@ -197,12 +216,10 @@ func main() {
 	slog.Info("MeshNode MQTT Relay — Deduplication Service (Go)")
 	slog.Info("============================================================")
 	slog.Info("Configuration",
-		"broker", fmt.Sprintf("%s:%d", cfg.MQTTHost, cfg.MQTTPort),
-		"sub_bridge_in", cfg.SubscribeBridgeIn,
-		"sub_local", cfg.SubscribeTopic,
-		"pub_clean", cfg.SourcePrefix+"<subtopic>",
-		"pub_relay_out", cfg.RelayPrefix+"<subtopic>",
-		"bridge_in_pfx", cfg.BridgeInPrefix,
+		"local", fmt.Sprintf("%s:%d", cfg.LocalBrokerHost, cfg.LocalBrokerPort),
+		"upstream_a", fmt.Sprintf("%s:%d", cfg.UpstreamABrokerHost, cfg.UpstreamABrokerPort),
+		"upstream_b", fmt.Sprintf("%s:%d", cfg.UpstreamBBrokerHost, cfg.UpstreamBBrokerPort),
+		"topic_root", cfg.TopicRoot,
 		"dedup_ttl", fmt.Sprintf("%ds", cfg.DedupTTL),
 		"cleanup_interval", fmt.Sprintf("%ds", cfg.CleanupInterval),
 		"log_level", cfg.LogLevel,
@@ -223,59 +240,59 @@ func main() {
 	// Start cleanup goroutine
 	go dedup.CleanupLoop(time.Duration(cfg.CleanupInterval) * time.Second)
 
-	// MQTT client options
-	broker := fmt.Sprintf("tcp://%s:%d", cfg.MQTTHost, cfg.MQTTPort)
-	opts := mqtt.NewClientOptions().
-		AddBroker(broker).
-		SetClientID("mqtt-relay-dedup").
-		SetUsername(cfg.MQTTUsername).
-		SetPassword(cfg.MQTTPassword).
-		SetCleanSession(true).
-		SetAutoReconnect(true).
-		SetOrderMatters(false). // parallel message processing — no queuing behind DROPs
-		SetConnectRetry(true).
-		SetConnectRetryInterval(5 * time.Second).
-		SetMaxReconnectInterval(30 * time.Second).
-		SetKeepAlive(60 * time.Second).
-		SetDefaultPublishHandler(relay.HandleMessage).
-		SetOnConnectHandler(func(client mqtt.Client) {
-			slog.Info("Connected to MQTT broker", "broker", broker)
-			health.SetConnected(true)
+	makeClient := func(name, broker, username, password string, handler mqtt.MessageHandler) mqtt.Client {
+		opts := mqtt.NewClientOptions().
+			AddBroker(broker).
+			SetClientID(name).
+			SetUsername(username).
+			SetPassword(password).
+			SetCleanSession(true).
+			SetAutoReconnect(true).
+			SetOrderMatters(false).
+			SetConnectRetry(true).
+			SetConnectRetryInterval(5 * time.Second).
+			SetMaxReconnectInterval(30 * time.Second).
+			SetKeepAlive(60 * time.Second).
+			SetDefaultPublishHandler(handler).
+			SetOnConnectHandler(func(client mqtt.Client) {
+				slog.Info("Connected to MQTT broker", "name", name, "broker", broker)
+				if token := client.Subscribe(cfg.TopicRoot, 0, nil); token.Wait() && token.Error() != nil {
+					slog.Error("Failed to subscribe",
+						"name", name,
+						"topic", cfg.TopicRoot,
+						"error", token.Error(),
+					)
+				} else {
+					slog.Info("Subscribed", "name", name, "topic", cfg.TopicRoot)
+				}
+				health.SetConnected(true)
+			}).
+			SetConnectionLostHandler(func(client mqtt.Client, err error) {
+				slog.Warn("Connection lost, will auto-reconnect…", "name", name, "error", err)
+				if name == "mqtt-relay-local" {
+					health.SetConnected(false)
+				}
+			}).
+			SetReconnectingHandler(func(client mqtt.Client, opts *mqtt.ClientOptions) {
+				slog.Info("Reconnecting to MQTT broker…", "name", name)
+			})
 
-			// Subscribe to bridge inbound (raw, potentially duplicated)
-			if token := client.Subscribe(cfg.SubscribeBridgeIn, 0, nil); token.Wait() && token.Error() != nil {
-				slog.Error("Failed to subscribe to bridge_in topic",
-					"topic", cfg.SubscribeBridgeIn,
-					"error", token.Error(),
-				)
-			} else {
-				slog.Info("Subscribed (bridge inbound)", "topic", cfg.SubscribeBridgeIn)
-			}
-
-			// Subscribe to local client messages (for outbound relay)
-			if token := client.Subscribe(cfg.SubscribeTopic, 0, nil); token.Wait() && token.Error() != nil {
-				slog.Error("Failed to subscribe to local topic",
-					"topic", cfg.SubscribeTopic,
-					"error", token.Error(),
-				)
-			} else {
-				slog.Info("Subscribed (local clients)", "topic", cfg.SubscribeTopic)
-			}
-		}).
-		SetConnectionLostHandler(func(client mqtt.Client, err error) {
-			slog.Warn("Connection lost, will auto-reconnect…", "error", err)
-			health.SetConnected(false)
-		}).
-		SetReconnectingHandler(func(client mqtt.Client, opts *mqtt.ClientOptions) {
-			slog.Info("Reconnecting to MQTT broker…")
-		})
-
-	// Connect
-	client := mqtt.NewClient(opts)
-	if token := client.Connect(); token.Wait() && token.Error() != nil {
-		slog.Error("Failed to connect to MQTT broker", "error", token.Error())
-		os.Exit(1)
+		client := mqtt.NewClient(opts)
+		if token := client.Connect(); token.Wait() && token.Error() != nil {
+			slog.Error("Failed to connect to MQTT broker", "name", name, "error", token.Error())
+			os.Exit(1)
+		}
+		return client
 	}
+
+	localBroker := fmt.Sprintf("tcp://%s:%d", cfg.LocalBrokerHost, cfg.LocalBrokerPort)
+	upstreamABroker := fmt.Sprintf("tcp://%s:%d", cfg.UpstreamABrokerHost, cfg.UpstreamABrokerPort)
+	upstreamBBroker := fmt.Sprintf("tcp://%s:%d", cfg.UpstreamBBrokerHost, cfg.UpstreamBBrokerPort)
+
+	localClient := makeClient("mqtt-relay-local", localBroker, cfg.LocalBrokerUsername, cfg.LocalBrokerPassword, relay.HandleLocalMessage)
+	upstreamAClient := makeClient("mqtt-relay-upstream-a", upstreamABroker, cfg.UpstreamABrokerUser, cfg.UpstreamABrokerPass, relay.HandleUpstreamAMessage)
+	upstreamBClient := makeClient("mqtt-relay-upstream-b", upstreamBBroker, cfg.UpstreamBBrokerUser, cfg.UpstreamBBrokerPass, relay.HandleUpstreamBMessage)
+	relay.SetClients(localClient, upstreamAClient, upstreamBClient)
 
 	// Start periodic stats logging goroutine
 	go func() {
@@ -284,6 +301,9 @@ func main() {
 		for range ticker.C {
 			slog.Info("Stats",
 				"received", relay.stats.Received.Load(),
+				"from_local", relay.stats.FromLocal.Load(),
+				"from_up_a", relay.stats.FromUpA.Load(),
+				"from_up_b", relay.stats.FromUpB.Load(),
 				"relayed_in", relay.stats.RelayedIn.Load(),
 				"relayed_out", relay.stats.RelayedOut.Load(),
 				"dropped", relay.stats.Dropped.Load(),
@@ -298,6 +318,8 @@ func main() {
 
 	<-ctx.Done()
 	slog.Info("Shutting down…")
-	client.Disconnect(1000) // wait up to 1s for in-flight messages
+	localClient.Disconnect(1000)
+	upstreamAClient.Disconnect(1000)
+	upstreamBClient.Disconnect(1000)
 	slog.Info("Disconnected. Goodbye!")
 }
