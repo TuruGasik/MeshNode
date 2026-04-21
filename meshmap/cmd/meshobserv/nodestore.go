@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"meshnode.id/meshmap/internal/meshtastic"
 	"meshnode.id/meshmap/internal/meshtastic/generated"
 
 	"google.golang.org/protobuf/proto"
@@ -454,4 +455,107 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(data)
+}
+
+// SyncFromSQLite loads valid nodes from SQLite into the in-memory NodeDB.
+// This ensures nodes persisted in SQLite appear on the map even after restart.
+func SyncFromSQLite(target *meshtastic.NodeDB, mu *sync.Mutex) {
+	nodeStoreMu.Lock()
+	defer nodeStoreMu.Unlock()
+
+	if nodeStoreDB == nil {
+		return
+	}
+
+	rows, err := nodeStoreDB.Query(`
+		SELECT node_num, hex_id, long_name, short_name, hw_model, role,
+			latitude, longitude, altitude, precision_bits,
+			fw_version, region, modem_preset, has_default_ch, online_local_nodes,
+			battery_level, voltage, ch_util, air_util_tx, uptime,
+			temperature, relative_humidity, barometric_pressure,
+			first_seen, last_seen
+		FROM nodes
+		WHERE has_position = 1 AND long_name != ''
+		ORDER BY last_seen DESC
+		LIMIT 2000
+	`)
+	if err != nil {
+		log.Printf("[sync] query error: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	syncTime := time.Now().Unix()
+	count := 0
+
+	for rows.Next() {
+		var nodeNum uint32
+		var hexID, longName, shortName, hwModel, role string
+		var latI, lonI, altitude int32
+		var precision uint32
+		var fwVersion, region, modemPreset string
+		var defCh, onlineLocalNodes int
+		var batteryLevel uint32
+		var voltage, chUtil, airUtilTx float32
+		var uptime uint32
+		var temperature, humidity, pressure float32
+		var firstSeen, lastSeen int64
+
+		rows.Scan(
+			&nodeNum, &hexID, &longName, &shortName, &hwModel, &role,
+			&latI, &lonI, &altitude, &precision,
+			&fwVersion, &region, &modemPreset, &defCh, &onlineLocalNodes,
+			&batteryLevel, &voltage, &chUtil, &airUtilTx, &uptime,
+			&temperature, &humidity, &pressure,
+			&firstSeen, &lastSeen,
+		)
+
+		mu.Lock()
+		node := (*target)[nodeNum]
+		if node == nil {
+			node = meshtastic.NewNode("synced")
+			(*target)[nodeNum] = node
+		}
+		mu.Unlock()
+
+		// Update user info
+		node.LongName = longName
+		node.ShortName = shortName
+		node.HwModel = hwModel
+		node.Role = role
+
+		// Update position
+		node.Latitude = latI
+		node.Longitude = lonI
+		node.Altitude = altitude
+		node.Precision = precision
+
+		// Update map report fields
+		node.FwVersion = fwVersion
+		node.Region = region
+		node.ModemPreset = modemPreset
+		node.HasDefaultCh = defCh == 1
+		node.OnlineLocalNodes = uint32(onlineLocalNodes)
+
+		// Update device metrics
+		node.BatteryLevel = batteryLevel
+		node.Voltage = voltage
+		node.ChUtil = chUtil
+		node.AirUtilTx = airUtilTx
+		node.Uptime = uptime
+
+		// Update environment metrics
+		node.Temperature = temperature
+		node.RelativeHumidity = humidity
+		node.BarometricPressure = pressure
+
+		// Ensure SeenBy has at least one entry (for IsValid check)
+		if len(node.SeenBy) == 0 {
+			node.SeenBy = map[string]int64{"synced": syncTime}
+		}
+
+		count++
+	}
+
+	log.Printf("[sync] synced %d nodes from SQLite", count)
 }

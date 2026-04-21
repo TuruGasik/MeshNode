@@ -26,6 +26,7 @@ const (
 	NeighborExpiration = 7200       // 2 hr
 	MetricsExpiration  = 7200       // 2 hr
 	PruneWriteInterval = time.Minute
+	SyncInterval       = 30 * time.Second
 	RateLimitCount     = 1500
 	RateLimitDuration  = 5 * time.Minute
 )
@@ -217,6 +218,9 @@ func main() {
 	if Nodes == nil {
 		Nodes = make(meshtastic.NodeDB)
 	}
+
+	// initial sync from SQLite to in-memory
+	SyncFromSQLite(&Nodes, &NodesMutex)
 	// load node blocklist
 	blocked := make(map[uint32]struct{})
 	if len(blockedPath) > 0 {
@@ -295,6 +299,14 @@ func main() {
 			if !Receiving.CompareAndSwap(true, false) {
 				log.Fatal("[fatal] no messages received")
 			}
+		}
+	}()
+
+	// periodic sync from SQLite to in-memory NodeDB
+	go func() {
+		for {
+			time.Sleep(SyncInterval)
+			SyncFromSQLite(&Nodes, &NodesMutex)
 		}
 	}()
 	// wait until exit

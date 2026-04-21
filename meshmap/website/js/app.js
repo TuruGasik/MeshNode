@@ -133,8 +133,8 @@ function ndRender(nodes, clear) {
   const now = Date.now() / 1000
   nodes.forEach(n => {
     const age = now - n.lastSeen
-    const isDead = age > 86400
-    const isOff = age > 43200
+    const isDead = age > 86400      // 24 hours
+    const isOff = age > 21600      // 6 hours
     // Client-side filter
     if (ndFilter === 'online' && isOff) return
     if (ndFilter === 'offline' && (!isOff || isDead)) return
@@ -153,8 +153,9 @@ function ndRender(nodes, clear) {
     const safeLong = html(n.longName || '\u2014')
     const safeShort = html(n.shortName || '\u2014')
     tr.innerHTML = `
-      <td><b>${safeLong}</b> <span style="color:#999;">(${safeShort})</span></td>
       <td style="font-family:monospace;font-size:12px;">${html(n.hexId)}</td>
+      <td style="font-family:monospace;font-size:12px;">${safeShort}</td>
+      <td><b>${safeLong}</b></td>
       <td class="nd-hide-sm">${html(n.hwModel || '\u2014')}</td>
       <td class="nd-hide-sm">${html(n.region || '\u2014')}</td>
       <td>${statusBadge}</td>
@@ -249,7 +250,7 @@ const updateNodes = data => {
     const ls = Math.max(...Object.values(n.seenBy))
     const age = Date.now() / 1000 - ls
     if (age > 86400) return
-    if (age > 43200) cOff++
+    if (age > 21600) cOff++
     else cOn++
   })
   const _sm = window.innerWidth < 500
@@ -268,7 +269,7 @@ const updateNodes = data => {
   const now2 = Date.now() / 1000
   Object.values(byName).forEach(group => {
     if (group.length < 2) return
-    const hasOnline = group.some(g => (now2 - g.ls) <= 43200)
+    const hasOnline = group.some(g => (now2 - g.ls) <= 21600)
     if (hasOnline) group.forEach(g => { if ((now2 - g.ls) > 86400) hiddenNodes.add(g.num) })
   })
 
@@ -350,8 +351,8 @@ const updateNodes = data => {
     }
     const lastSeen = Math.max(...Object.values(seenBy))
     const age = Date.now() / 1000 - lastSeen
-    const isOffline = age > 43200
-    const isDead = age > 86400
+    const isOffline = age > 21600     // 6 hours
+    const isDead = age > 86400        // 24 hours
     if (isDead) return
     if (isOffline && !filterOffline) return
     if (!isOffline && !filterOnline) return
