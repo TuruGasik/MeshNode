@@ -79,6 +79,25 @@ func InitNodeStore(dbPath string) error {
 			return fmt.Errorf("create index: %w", err)
 		}
 	}
+	// Create position_history table for tracking node movements
+	_, err = nodeStoreDB.Exec(`CREATE TABLE IF NOT EXISTS position_history (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		node_num        INTEGER NOT NULL,
+		hex_id          TEXT    NOT NULL,
+		latitude        INTEGER NOT NULL,
+		longitude       INTEGER NOT NULL,
+		altitude        INTEGER DEFAULT 0,
+		precision_bits  INTEGER DEFAULT 0,
+		source          TEXT    DEFAULT 'position',
+		created_at      INTEGER NOT NULL
+	)`)
+	if err != nil {
+		return fmt.Errorf("create position_history table: %w", err)
+	}
+	_, err = nodeStoreDB.Exec(`CREATE INDEX IF NOT EXISTS idx_poshist_node ON position_history(node_num, created_at DESC)`)
+	if err != nil {
+		return fmt.Errorf("create poshist index: %w", err)
+	}
 	var count int
 	nodeStoreDB.QueryRow("SELECT COUNT(*) FROM nodes").Scan(&count)
 	log.Printf("[nodestore] initialized (%d nodes in db)", count)
@@ -127,6 +146,8 @@ func storeMessage(from uint32, topic string, portNum generated.PortNum, payload 
 			return
 		}
 		upsertPosition(from, hexID, lat, lon, pos.GetAltitude(), pos.GetPrecisionBits(), now)
+		// Store position history for tracker
+		go StorePositionHistory(from, hexID, lat, lon, pos.GetAltitude(), pos.GetPrecisionBits(), "position")
 
 	case generated.PortNum_TELEMETRY_APP:
 		var tel generated.Telemetry
@@ -159,6 +180,8 @@ func storeMessage(from uint32, topic string, portNum generated.PortNum, payload 
 		upsertMapReport(from, hexID, mr.GetFirmwareVersion(), mr.GetRegion().String(),
 			mr.GetModemPreset().String(), mr.GetHasDefaultChannel(), mr.GetNumOnlineLocalNodes(), now)
 		upsertPosition(from, hexID, lat, lon, mr.GetAltitude(), mr.GetPositionPrecision(), now)
+		// Store position history for tracker
+		go StorePositionHistory(from, hexID, lat, lon, mr.GetAltitude(), mr.GetPositionPrecision(), "map_report")
 	}
 }
 
@@ -319,6 +342,9 @@ func StartAPI(addr string) {
 	mux.HandleFunc("/api/nodes/search", handleNodeSearch)
 	mux.HandleFunc("/api/nodes/all", handleNodeAll)
 	mux.HandleFunc("/api/nodes/stats", handleNodeStats)
+	// Tracker API endpoints
+	mux.HandleFunc("/api/tracker/nodes", handleTrackerNodes)
+	mux.HandleFunc("/api/tracker/nodes/", handleTrackerNodePath)
 	log.Printf("[api] starting on %s", addr)
 	go func() {
 		if err := http.ListenAndServe(addr, mux); err != nil {
@@ -455,6 +481,295 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(data)
+}
+
+// ── Position History (Tracker) ──────────────────────────────────────────────
+
+// PositionHistoryRecord represents a single position record
+type PositionHistoryRecord struct {
+	ID             int64   `json:"id"`
+	NodeNum        uint32  `json:"nodeNum"`
+	HexID          string  `json:"hexId"`
+	LatitudeInt    int32   `json:"-"`
+	LongitudeInt   int32   `json:"-"`
+	LatitudeFloat  float64 `json:"latitude"`
+	LongitudeFloat float64 `json:"longitude"`
+	Altitude       int32   `json:"altitude,omitempty"`
+	PrecisionBits  uint32  `json:"precisionBits,omitempty"`
+	Source         string  `json:"source"`
+	CreatedAt      int64   `json:"createdAt"`
+}
+
+// TrackerNode represents a mobile node with latest position
+type TrackerNode struct {
+	NodeNum        uint32                  `json:"nodeNum"`
+	HexID          string                  `json:"hexId"`
+	LongName       string                  `json:"longName"`
+	ShortName      string                  `json:"shortName"`
+	Latitude       float64                 `json:"latitude"`
+	Longitude      float64                 `json:"longitude"`
+	LastSeen       int64                   `json:"lastSeen"`
+	PositionCount  int                     `json:"positionCount"`
+	TotalDistanceM float64                 `json:"totalDistanceM,omitempty"`
+	AvgSpeedKmh    float64                 `json:"avgSpeedKmh,omitempty"`
+	Positions      []PositionHistoryRecord `json:"positions,omitempty"`
+}
+
+// StorePositionHistory saves a position record for a node
+func StorePositionHistory(nodeNum uint32, hexID string, lat, lon, alt int32, precision uint32, source string) {
+	nodeStoreMu.Lock()
+	defer nodeStoreMu.Unlock()
+	if nodeStoreDB == nil {
+		return
+	}
+
+	// Skip if same position as last record (within precision threshold)
+	threshold := int32(1) // minimum 1 unit (~11cm at equator)
+	if precision > 0 && precision < 32 {
+		threshold = int32(1 << uint(32-precision))
+		if threshold < 1 {
+			threshold = 1
+		}
+	}
+
+	var lastLat, lastLon int32
+	var lastTime int64
+	now := time.Now().Unix()
+	err := nodeStoreDB.QueryRow(`
+		SELECT latitude, longitude, created_at FROM position_history
+		WHERE node_num = ? ORDER BY created_at DESC LIMIT 1
+	`, nodeNum).Scan(&lastLat, &lastLon, &lastTime)
+	if err == nil {
+		// Check if position changed beyond threshold
+		if absInt32(lat-lastLat) <= threshold && absInt32(lon-lastLon) <= threshold {
+			// Same position, skip (but update timestamp if > 1 hour old)
+			if lastTime < now-3600 {
+				nodeStoreDB.Exec(`UPDATE position_history SET created_at = ? WHERE id = (
+					SELECT id FROM position_history WHERE node_num = ? ORDER BY created_at DESC LIMIT 1
+				)`, now, nodeNum)
+			}
+			return
+		}
+	}
+
+	_, err = nodeStoreDB.Exec(`
+		INSERT INTO position_history (node_num, hex_id, latitude, longitude, altitude, precision_bits, source, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, nodeNum, hexID, lat, lon, alt, precision, source, now)
+	if err != nil {
+		log.Printf("[poshist] insert error: %v", err)
+	}
+}
+
+func absInt32(n int32) int32 {
+	if n < 0 {
+		return -n
+	}
+	return n
+}
+
+// PrunePositionHistory removes old records
+func PrunePositionHistory() {
+	nodeStoreMu.Lock()
+	defer nodeStoreMu.Unlock()
+	if nodeStoreDB == nil {
+		return
+	}
+	now := time.Now().Unix()
+	cutoff := now - (7 * 24 * 60 * 60) // 7 days
+	// Delete records older than 7 days
+	result, err := nodeStoreDB.Exec(`DELETE FROM position_history WHERE created_at < ?`, cutoff)
+	if err != nil {
+		log.Printf("[poshist] prune error: %v", err)
+		return
+	}
+	deleted, _ := result.RowsAffected()
+	if deleted > 0 {
+		log.Printf("[poshist] pruned %d old records", deleted)
+	}
+}
+
+// CleanupDuplicatePositions removes duplicate position entries
+// Keeps only the first occurrence of each unique (node_num, latitude, longitude)
+func CleanupDuplicatePositions() {
+	nodeStoreMu.Lock()
+	defer nodeStoreMu.Unlock()
+	if nodeStoreDB == nil {
+		return
+	}
+
+	// Delete duplicate positions, keeping oldest (rn=1) for each unique (node_num, lat, lon)
+	// Only affects positions appearing 2+ times
+	_, err := nodeStoreDB.Exec(`
+		DELETE FROM position_history
+		WHERE id IN (
+			SELECT id FROM (
+				SELECT id, ROW_NUMBER() OVER (PARTITION BY node_num, latitude, longitude ORDER BY id) as rn
+				FROM position_history
+			) WHERE rn > 1
+		)
+	`)
+	if err != nil {
+		log.Printf("[poshist] cleanup error: %v", err)
+		return
+	}
+	log.Printf("[poshist] duplicate cleanup done")
+}
+
+// GetTrackerNodes returns nodes that have position history (mobile nodes)
+func GetTrackerNodes() []TrackerNode {
+	nodeStoreMu.Lock()
+	defer nodeStoreMu.Unlock()
+	if nodeStoreDB == nil {
+		return nil
+	}
+	// First get all nodes with position history
+	rows, err := nodeStoreDB.Query(`
+		SELECT 
+			n.node_num, n.hex_id, 
+			CASE WHEN n.long_name != '' THEN n.long_name ELSE n.hex_id END as display_name,
+			CASE WHEN n.short_name != '' THEN n.short_name ELSE '' END as short_name,
+			n.latitude, n.longitude, n.last_seen,
+			COUNT(ph.id) as pos_count
+		FROM nodes n
+		JOIN position_history ph ON n.node_num = ph.node_num
+		WHERE n.has_position = 1
+		GROUP BY n.node_num
+		HAVING pos_count >= 1
+		ORDER BY n.last_seen DESC
+		LIMIT 100
+	`)
+	if err != nil {
+		log.Printf("[tracker] get nodes error: %v", err)
+		return nil
+	}
+	defer rows.Close()
+
+	// Get position history for each node
+	var nodes []TrackerNode
+	for rows.Next() {
+		var n TrackerNode
+		var latI, lonI int32
+		var displayName string
+		rows.Scan(&n.NodeNum, &n.HexID, &displayName, &n.ShortName,
+			&latI, &lonI, &n.LastSeen, &n.PositionCount)
+		n.LongName = displayName
+		n.Latitude = float64(latI) / 1e7
+		n.Longitude = float64(lonI) / 1e7
+
+		// Get recent positions for this node
+		posRows, err := nodeStoreDB.Query(`
+			SELECT id, node_num, hex_id, latitude, longitude, altitude, precision_bits, source, created_at
+			FROM position_history
+			WHERE node_num = ?
+			ORDER BY created_at DESC
+			LIMIT 50
+		`, n.NodeNum)
+		if err == nil {
+			for posRows.Next() {
+				var p PositionHistoryRecord
+				posRows.Scan(&p.ID, &p.NodeNum, &p.HexID, &p.LatitudeInt, &p.LongitudeInt,
+					&p.Altitude, &p.PrecisionBits, &p.Source, &p.CreatedAt)
+				p.LatitudeFloat = float64(p.LatitudeInt) / 1e7
+				p.LongitudeFloat = float64(p.LongitudeInt) / 1e7
+				n.Positions = append(n.Positions, p)
+			}
+			posRows.Close()
+		}
+
+		nodes = append(nodes, n)
+	}
+	if nodes == nil {
+		nodes = []TrackerNode{}
+	}
+	return nodes
+}
+
+// GetNodePositionHistory returns position history for a specific node
+func GetNodePositionHistory(nodeNum uint32, limit int) []PositionHistoryRecord {
+	nodeStoreMu.Lock()
+	defer nodeStoreMu.Unlock()
+	if nodeStoreDB == nil {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 500
+	}
+	rows, err := nodeStoreDB.Query(`
+		SELECT id, node_num, hex_id, latitude, longitude, altitude, precision_bits, source, created_at
+		FROM position_history
+		WHERE node_num = ?
+		ORDER BY created_at DESC
+		LIMIT ?
+	`, nodeNum, limit)
+	if err != nil {
+		log.Printf("[tracker] get history error: %v", err)
+		return nil
+	}
+	defer rows.Close()
+	var records []PositionHistoryRecord
+	for rows.Next() {
+		var r PositionHistoryRecord
+		var latI, lonI int32
+		rows.Scan(&r.ID, &r.NodeNum, &r.HexID, &latI, &lonI, &r.Altitude,
+			&r.PrecisionBits, &r.Source, &r.CreatedAt)
+		r.LatitudeFloat = float64(latI) / 1e7
+		r.LongitudeFloat = float64(lonI) / 1e7
+		records = append(records, r)
+	}
+	if records == nil {
+		records = []PositionHistoryRecord{}
+	}
+	return records
+}
+
+// ── Tracker Auth ──────────────────────────────────────────────────────────────
+
+var trackerPassword string
+
+func SetTrackerPassword(pwd string) {
+	trackerPassword = pwd
+}
+
+func checkTrackerAuth(r *http.Request) bool {
+	if trackerPassword == "" {
+		return true // No password set, allow all
+	}
+	// Check header first (used by tracker.js), then query param
+	pwd := r.Header.Get("X-Tracker-Password")
+	if pwd == "" {
+		pwd = r.URL.Query().Get("pwd")
+	}
+	return pwd == trackerPassword
+}
+
+func handleTrackerNodes(w http.ResponseWriter, r *http.Request) {
+	if !checkTrackerAuth(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	nodes := GetTrackerNodes()
+	writeJSON(w, http.StatusOK, nodes)
+}
+
+func handleTrackerNodePath(w http.ResponseWriter, r *http.Request) {
+	if !checkTrackerAuth(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	nodeNumStr := strings.TrimPrefix(r.URL.Path, "/api/tracker/nodes/")
+	nodeNumStr = strings.TrimSuffix(nodeNumStr, "/path")
+	nodeNum, err := strconv.ParseUint(nodeNumStr, 10, 32)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid node num"})
+		return
+	}
+	limit := 200
+	if v, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && v > 0 && v <= 1000 {
+		limit = v
+	}
+	records := GetNodePositionHistory(uint32(nodeNum), limit)
+	writeJSON(w, http.StatusOK, records)
 }
 
 // SyncFromSQLite loads valid nodes from SQLite into the in-memory NodeDB.

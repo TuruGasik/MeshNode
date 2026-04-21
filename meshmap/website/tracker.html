@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MeshNode Tracker</title>
+  <link rel="stylesheet" href="/css/tracker.css">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+</head>
+<body>
+  <div id="login-overlay" class="overlay">
+    <div class="login-box">
+      <h2>🔒 Tracker Access</h2>
+      <p>Enter password to access mobile tracker</p>
+      <form id="login-form">
+        <input type="password" id="password-input" placeholder="Password" autocomplete="off">
+        <button type="submit">Login</button>
+      </form>
+      <p id="login-error" class="error"></p>
+    </div>
+  </div>
+
+  <div id="main-content" class="hidden">
+    <div id="sidebar">
+      <div class="sidebar-header">
+        <h1>📍 Mobile Tracker</h1>
+        <button id="logout-btn" title="Logout">Logout</button>
+      </div>
+      <div class="stats-bar">
+        <span id="node-count">0 nodes</span>
+        <span id="last-update">-</span>
+      </div>
+      <div class="controls">
+        <label>
+          <input type="checkbox" id="show-paths" checked>
+          Show paths
+        </label>
+        <label>
+          <input type="checkbox" id="auto-refresh" checked>
+          Auto-refresh (30s)
+        </label>
+      </div>
+      <div id="node-list"></div>
+    </div>
+    <div id="map"></div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/js/tracker.js"></script>
+</body>
+</html>
+</body>
+</html>

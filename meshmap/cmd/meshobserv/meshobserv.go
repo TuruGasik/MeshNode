@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"flag"
+	"fmt"
 	"io/fs"
 	"log"
 	"os"
@@ -56,6 +57,8 @@ func handleMessage(from uint32, topic string, portNum generated.PortNum, payload
 		if latitude == 0 && longitude == 0 {
 			return
 		}
+		// Store position history for tracker
+		go StorePositionHistory(from, fmt.Sprintf("!%x", from), latitude, longitude, altitude, precision, "position")
 		NodesMutex.Lock()
 		if Nodes[from] == nil {
 			Nodes[from] = meshtastic.NewNode(topic)
@@ -156,11 +159,13 @@ func handleMessage(from uint32, topic string, portNum generated.PortNum, payload
 		}
 		NodesMutex.Unlock()
 	case generated.PortNum_MAP_REPORT_APP:
+		log.Printf("[mapreport] received from %v on %v", from, topic)
 		var mapReport generated.MapReport
 		if err := proto.Unmarshal(payload, &mapReport); err != nil {
 			log.Printf("[warn] could not parse MapReport payload from %v on %v: %v", from, topic, err)
 			return
 		}
+		log.Printf("[mapreport] parsed: longName=%q, lat=%v, lon=%v", mapReport.GetLongName(), mapReport.GetLatitudeI(), mapReport.GetLongitudeI())
 		longName := mapReport.GetLongName()
 		shortName := mapReport.GetShortName()
 		hwModel := mapReport.GetHwModel().String()
@@ -180,6 +185,8 @@ func handleMessage(from uint32, topic string, portNum generated.PortNum, payload
 		if latitude == 0 && longitude == 0 {
 			return
 		}
+		// Store position history for tracker
+		go StorePositionHistory(from, longName, latitude, longitude, altitude, precision, "mapreport")
 		NodesMutex.Lock()
 		if Nodes[from] == nil {
 			Nodes[from] = meshtastic.NewNode(topic)
@@ -193,13 +200,21 @@ func handleMessage(from uint32, topic string, portNum generated.PortNum, payload
 }
 
 func main() {
-	var dbPath, blockedPath, broker, username, password string
+	var dbPath, blockedPath, broker, username, password, trackerPassword string
 	flag.StringVar(&dbPath, "f", "", "node database `file`")
 	flag.StringVar(&blockedPath, "b", "", "node blocklist `file`")
 	flag.StringVar(&broker, "m", "tcp://mqtt.meshtastic.org:1883", "MQTT broker `URL`")
 	flag.StringVar(&username, "u", "meshdev", "MQTT broker `username`")
 	flag.StringVar(&password, "p", "large4cats", "MQTT broker `password`")
+	flag.StringVar(&trackerPassword, "t", "", "tracker page `password`")
 	flag.Parse()
+
+	// Set tracker password from env/flag
+	if envPwd := os.Getenv("TRACKER_PASSWORD"); envPwd != "" {
+		SetTrackerPassword(envPwd)
+	} else if trackerPassword != "" {
+		SetTrackerPassword(trackerPassword)
+	}
 	// load or make NodeDB
 	if len(dbPath) > 0 {
 		err := Nodes.LoadFile(dbPath)
@@ -259,7 +274,7 @@ func main() {
 			"msh/ID/2/map/",
 			"msh/ID/2/e/+/+",
 		},
-		TopicRegex: regexp.MustCompile(`^msh(?:/[^/]+)+/2/(?:e/[^/]+/![0-9a-f]+|map/)$`),
+		TopicRegex: regexp.MustCompile(`^msh(?:/[^/]+)+/2/(?:e/[^/]+/![0-9a-f#]+|map/)$`),
 		Accept: func(from uint32) bool {
 			if _, found := blocked[from]; found {
 				return false
@@ -309,6 +324,19 @@ func main() {
 			SyncFromSQLite(&Nodes, &NodesMutex)
 		}
 	}()
+
+	// periodic prune of position history (every 6 hours)
+	go func() {
+		ticker := time.NewTicker(6 * time.Hour)
+		CleanupDuplicatePositions() // clean duplicates at startup
+		PrunePositionHistory()      // then prune old records
+		for {
+			<-ticker.C
+			CleanupDuplicatePositions()
+			PrunePositionHistory()
+		}
+	}()
+
 	// wait until exit
 	terminate := make(chan os.Signal, 1)
 	signal.Notify(terminate, syscall.SIGINT, syscall.SIGTERM)

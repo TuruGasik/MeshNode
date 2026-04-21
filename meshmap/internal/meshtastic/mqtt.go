@@ -83,8 +83,10 @@ func (c *MQTTClient) handleMessage(_ mqtt.Client, msg mqtt.Message) {
 	// filter topic
 	topic := msg.Topic()
 	if !c.TopicRegex.MatchString(topic) {
+		log.Printf("[mqtt] topic %q did not match filter", topic)
 		return
 	}
+	log.Printf("[mqtt] topic %q matched filter", topic)
 	// parse ServiceEnvelope
 	var envelope generated.ServiceEnvelope
 	if err := proto.Unmarshal(msg.Payload(), &envelope); err != nil {
