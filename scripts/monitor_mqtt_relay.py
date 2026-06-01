@@ -1,31 +1,49 @@
 #!/usr/bin/env python3
 """
-MQTT Relay Monitor v2 - Monitor relay dedup service in real-time
-Shows raw bridge inbound vs clean deduped vs outbound relay messages
-with dedup stats.
+MQTT Relay Monitor v3 — Real dedup tracker
 
-Architecture (v2):
-  📥 BRIDGE_IN : msh/bridge_in/ID/#  — raw from bridges (2x dups)
-  📦 CLEAN     : msh/ID/#            — deduped by relay for clients
-  📤 RELAYED   : msh/relay/ID/#      — outbound to bridges
+Subscribes to all three brokers the relay is connected to (local + upstream A
++ upstream B), all on the SAME topic (TOPIC_ROOT). For each message it computes
+the canonical Meshtastic hash and marks it as first-seen or duplicate, mirroring
+the dedup logic of the Go relay.
+
+Optionally polls the relay's /metrics endpoint to cross-check counters.
+
+Env (loaded from /root/MeshNode/.env if present):
+  LOCAL_MQTT_HOST / LOCAL_MQTT_PORT / LOCAL_MQTT_TLS / LOCAL_MQTT_USERNAME / LOCAL_MQTT_PASSWORD
+  UPSTREAM_A_HOST / UPSTREAM_A_PORT / UPSTREAM_A_TLS / UPSTREAM_A_USERNAME / UPSTREAM_A_PASSWORD
+  UPSTREAM_B_HOST / UPSTREAM_B_PORT / UPSTREAM_B_TLS / UPSTREAM_B_USERNAME / UPSTREAM_B_PASSWORD
+  TOPIC_ROOT     (default: msh/ID/#)
+  RELAY_METRICS_URL (default: http://localhost:8081/metrics)
+
+Monitor-only overrides (use these so monitor talks to the host, not the docker network):
+  MONITOR_LOCAL_HOST / MONITOR_LOCAL_PORT / MONITOR_LOCAL_TLS / MONITOR_LOCAL_USER / MONITOR_LOCAL_PASS
 """
 
-import threading
-import sys
-import os
-import hashlib
-from datetime import datetime
-from collections import defaultdict
-import base64
-import struct
+from __future__ import annotations
 
-# Optional: pip install meshtastic cryptography
+import base64
+import hashlib
+import os
+import ssl
+import struct
+import sys
+import threading
+import time
+import urllib.request
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Optional
+
+import paho.mqtt.client as paho_mqtt
+
 try:
     from meshtastic.protobuf import mesh_pb2, mqtt_pb2, telemetry_pb2
     _PROTO_AVAILABLE = True
 except ImportError:
     try:
-        from meshtastic import mesh_pb2, mqtt_pb2, telemetry_pb2
+        from meshtastic import mesh_pb2, mqtt_pb2, telemetry_pb2  # type: ignore
         _PROTO_AVAILABLE = True
     except ImportError:
         _PROTO_AVAILABLE = False
@@ -36,74 +54,208 @@ try:
 except ImportError:
     _CRYPTO_AVAILABLE = False
 
-# Server config — credentials from environment variables.
-# Load .env if exists
-env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env")
-if os.path.exists(env_path):
-    with open(env_path) as f:
+
+# ---------------------------------------------------------------------------
+# Env loader
+# ---------------------------------------------------------------------------
+
+ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env")
+if os.path.exists(ENV_PATH):
+    with open(ENV_PATH) as f:
         for line in f:
             if "=" in line and not line.strip().startswith("#"):
                 k, v = line.strip().split("=", 1)
-                os.environ.setdefault(k, v)
+                os.environ.setdefault(k, v.strip().strip('"').strip("'"))
 
-BROKER = {
-    "host": os.environ.get("MONITOR_LOCAL_HOST", "localhost"),
-    "port": int(os.environ.get("MONITOR_LOCAL_PORT", "1883")),
-    "user": os.environ.get("MONITOR_LOCAL_USER", os.environ.get("MQTT_USERNAME", "")),
-    "pass": os.environ.get("MONITOR_LOCAL_PASS", os.environ.get("MQTT_PASSWORD", "")),
-}
 
-# Topics to monitor (v2 — 3 namespaces)
-TOPICS = {
-    "BRIDGE_IN": "msh/bridge_in/ID/#",  # Raw inbound from bridges (duplicated)
-    "CLEAN":     "msh/ID/#",             # Deduped by relay → local clients
-    "RELAYED":   "msh/relay/ID/#",       # Outbound to bridges
-}
+def _bool(name: str, default: bool = False) -> bool:
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    return v.strip().lower() in {"1", "true", "yes", "y", "on"}
 
+
+def _int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+# ---------------------------------------------------------------------------
+# Broker config (uses MONITOR_LOCAL_* override for local since the monitor
+# runs on the host, not inside the docker network)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class BrokerCfg:
+    label: str
+    host: str
+    port: int
+    tls: bool
+    user: str
+    password: str
+
+
+BROKERS: list[BrokerCfg] = []
+
+# local — prefer MONITOR_LOCAL_* override
+local_host = os.environ.get("MONITOR_LOCAL_HOST", "localhost")
+if local_host:
+    BROKERS.append(BrokerCfg(
+        label="LOCAL",
+        host=local_host,
+        port=_int("MONITOR_LOCAL_PORT", 1883),
+        tls=_bool("MONITOR_LOCAL_TLS", False),
+        user=os.environ.get("MONITOR_LOCAL_USER", os.environ.get("LOCAL_MQTT_USERNAME", "")),
+        password=os.environ.get("MONITOR_LOCAL_PASS", os.environ.get("LOCAL_MQTT_PASSWORD", "")),
+    ))
+
+# upstream A
+up_a_host = os.environ.get("UPSTREAM_A_HOST", "")
+if up_a_host:
+    BROKERS.append(BrokerCfg(
+        label="UP_A",
+        host=up_a_host,
+        port=_int("UPSTREAM_A_PORT", 1883),
+        tls=_bool("UPSTREAM_A_TLS", False),
+        user=os.environ.get("UPSTREAM_A_USERNAME", ""),
+        password=os.environ.get("UPSTREAM_A_PASSWORD", ""),
+    ))
+
+# upstream B
+up_b_host = os.environ.get("UPSTREAM_B_HOST", "")
+if up_b_host:
+    BROKERS.append(BrokerCfg(
+        label="UP_B",
+        host=up_b_host,
+        port=_int("UPSTREAM_B_PORT", 1883),
+        tls=_bool("UPSTREAM_B_TLS", False),
+        user=os.environ.get("UPSTREAM_B_USERNAME", ""),
+        password=os.environ.get("UPSTREAM_B_PASSWORD", ""),
+    ))
+
+TOPIC_ROOT = os.environ.get("TOPIC_ROOT", "msh/ID/#")
+METRICS_URL = os.environ.get("RELAY_METRICS_URL", "http://localhost:8081/metrics")
+
+# ---------------------------------------------------------------------------
+# Canonical hashing — mirrors dedup.go in the Go relay
+# ---------------------------------------------------------------------------
+
+# Meshtastic default channel PSK (AQ== expands to this 16-byte AES key)
+_DEFAULT_KEY_BYTES = base64.b64decode("1PG7OiApB1nwvP+rz05pAQ==")
+CHANNEL_KEYS = {"LongFast": "AQ==", "MeshNode_ID": "AQ=="}
+_PORT_TEXT, _PORT_POS, _PORT_NODEINFO, _PORT_TELEMETRY = 1, 3, 4, 67
+
+
+def canonical_hash(topic: str, payload: bytes) -> str:
+    """Compute the same canonical SHA-256 the Go relay uses.
+
+    For a valid Meshtastic ServiceEnvelope we extract the immutable packet
+    fields (from, to, id, channel, encrypted/decoded) and hash topic + those.
+    Otherwise fall back to hashing topic + raw payload.
+    """
+    canon = _canonical_meshpacket(payload)
+    h = hashlib.sha256()
+    h.update(topic.encode("utf-8"))
+    h.update(canon if canon is not None else payload)
+    return h.hexdigest()
+
+
+def _canonical_meshpacket(envelope: bytes) -> Optional[bytes]:
+    if not _PROTO_AVAILABLE:
+        return None
+    try:
+        env = mqtt_pb2.ServiceEnvelope()
+        env.ParseFromString(envelope)
+    except Exception:
+        return None
+    pkt = env.packet
+    from_node = getattr(pkt, "from")
+    to_node = pkt.to
+    pkt_id = pkt.id
+    if from_node == 0 or pkt_id == 0:
+        # missing required identity → fall back to raw hash
+        return None
+    encrypted = bytes(pkt.encrypted) if pkt.HasField("encrypted") else b""
+    decoded = pkt.decoded.SerializeToString() if pkt.HasField("decoded") else b""
+    if not encrypted and not decoded:
+        return None
+    out = (
+        struct.pack("<Q", from_node) +
+        struct.pack("<Q", to_node) +
+        struct.pack("<Q", pkt_id) +
+        struct.pack("<Q", pkt.channel) +
+        encrypted +
+        decoded
+    )
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Stats
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Stats:
+    received: dict[str, int] = field(default_factory=lambda: defaultdict(int))
+    first_seen: dict[str, int] = field(default_factory=lambda: defaultdict(int))
+    duplicates: dict[str, int] = field(default_factory=lambda: defaultdict(int))
+    per_subtopic_first: dict[str, int] = field(default_factory=lambda: defaultdict(int))
+    per_subtopic_dup: dict[str, int] = field(default_factory=lambda: defaultdict(int))
+
+
+stats = Stats()
 stats_lock = threading.Lock()
-stats = {
-    "bridge_in": 0,
-    "clean": 0,
-    "relayed": 0,
-}
-per_subtopic = defaultdict(lambda: {"bridge_in": 0, "clean": 0, "relayed": 0})
 
-# Channel PSK config — base64 PSK per channel name.
-# AQ== = Meshtastic default key (0x01), expands to 1PG7OiApB1nwvP+rz05pAQ== padded to 32B.
-CHANNEL_KEYS = {
-    "LongFast":    "AQ==",
-    "MeshNode_ID": "AQ==",
-}
-_DEFAULT_KEY_BYTES = base64.b64decode("1PG7OiApB1nwvP+rz05pAQ==")  # 16 bytes → AES-128
+# Hash → (first_label, first_ts) within DEDUP_WINDOW seconds
+DEDUP_WINDOW = 600  # match relay default
+seen_lock = threading.Lock()
+seen: dict[str, tuple[str, float]] = {}
+seen_q: deque[tuple[str, float]] = deque()  # (hash, ts) for cheap eviction
 
-import paho.mqtt.client as paho_mqtt
 
-# Portnum constants (meshtastic/protobuf/portnums_pb2.py)
-_PORT_TEXT      = 1   # TEXT_MESSAGE_APP
-_PORT_POSITION  = 3   # POSITION_APP
-_PORT_NODEINFO  = 4   # NODEINFO_APP
-_PORT_TELEMETRY = 67  # TELEMETRY_APP
+def _evict_expired(now: float) -> None:
+    while seen_q and now - seen_q[0][1] > DEDUP_WINDOW:
+        h, ts = seen_q.popleft()
+        cur = seen.get(h)
+        if cur and cur[1] == ts:
+            seen.pop(h, None)
 
+
+def check_seen(h: str, label: str) -> Optional[str]:
+    """Return None if first-seen; otherwise the previous source label."""
+    now = time.time()
+    with seen_lock:
+        _evict_expired(now)
+        prev = seen.get(h)
+        if prev is None:
+            seen[h] = (label, now)
+            seen_q.append((h, now))
+            return None
+        return prev[0]
+
+
+# ---------------------------------------------------------------------------
+# Decoding helpers (best-effort, for display only)
+# ---------------------------------------------------------------------------
 
 def _expand_psk(psk_b64: str) -> bytes:
-    """Expand PSK to actual key bytes. AQ== (0x01) → 16-byte default key."""
     raw = base64.b64decode(psk_b64)
     if len(raw) == 1 and raw[0] == 0x01:
-        raw = _DEFAULT_KEY_BYTES  # 16 bytes, use as AES-128
-    return raw  # 16 bytes = AES-128, 32 bytes = AES-256
+        return _DEFAULT_KEY_BYTES
+    return raw
 
 
-def _aes_ctr_decrypt(data: bytes, packet_id: int, from_node: int, key: bytes):
-    """AES-CTR decrypt. nonce = packet_id(8B LE) + from_node(4B LE) + 4 zero bytes."""
+def _aes_ctr_decrypt(data: bytes, packet_id: int, from_node: int, key: bytes) -> Optional[bytes]:
     if not _CRYPTO_AVAILABLE:
         return None
     try:
-        nonce = struct.pack('<Q', packet_id) + struct.pack('<I', from_node) + b'\x00\x00\x00\x00'
+        nonce = struct.pack("<Q", packet_id) + struct.pack("<I", from_node) + b"\x00\x00\x00\x00"
         cipher = Cipher(algorithms.AES(key), modes.CTR(nonce))
         dec = cipher.decryptor()
         return dec.update(data) + dec.finalize()
-    except Exception as e:
+    except Exception:
         return None
 
 
@@ -112,293 +264,295 @@ def _decode_data(data) -> str:
         port = data.portnum
         if port == _PORT_TEXT:
             return f"\U0001f4ac \"{data.payload.decode('utf-8', errors='replace')}\""
-        elif port == _PORT_POSITION:
+        if port == _PORT_POS:
             pos = mesh_pb2.Position()
             pos.ParseFromString(data.payload)
-            return f"\U0001f4cd {pos.latitude_i/1e7:.5f},{pos.longitude_i/1e7:.5f} alt={pos.altitude}m"
-        elif port == _PORT_NODEINFO:
+            return f"\U0001f4cd {pos.latitude_i/1e7:.5f},{pos.longitude_i/1e7:.5f}"
+        if port == _PORT_NODEINFO:
             user = mesh_pb2.User()
             user.ParseFromString(data.payload)
             return f"\U0001f464 {user.long_name} ({user.short_name})"
-        elif port == _PORT_TELEMETRY:
+        if port == _PORT_TELEMETRY:
             tel = telemetry_pb2.Telemetry()
             tel.ParseFromString(data.payload)
-            if tel.HasField('device_metrics'):
+            if tel.HasField("device_metrics"):
                 m = tel.device_metrics
-                return f"\U0001f50b {m.battery_level}% {m.voltage:.2f}V ch={m.channel_utilization:.1f}% air={m.air_util_tx:.1f}%"
-            if tel.HasField('environment_metrics'):
+                return f"\U0001f50b {m.battery_level}% {m.voltage:.2f}V"
+            if tel.HasField("environment_metrics"):
                 m = tel.environment_metrics
-                return f"\U0001f321\ufe0f {m.temperature:.1f}\u00b0C {m.relative_humidity:.1f}% {m.barometric_pressure:.1f}hPa"
+                return f"\U0001f321\ufe0f {m.temperature:.1f}\u00b0C"
             return "\U0001f4ca TELEMETRY"
-        else:
-            return f"[port={port} {len(data.payload)}B]"
+        return f"[port={port} {len(data.payload)}B]"
     except Exception as e:
         return f"[decode err: {e}]"
 
 
-def decode_payload(msg_topic: str, payload_bytes: bytes) -> str:
-    """Decode a Meshtastic ServiceEnvelope payload into human-readable string."""
+def decode_payload(topic: str, payload: bytes) -> str:
     if not _PROTO_AVAILABLE:
-        return format_payload(payload_bytes)
-    # /json/ topics are plain JSON, not protobuf ServiceEnvelope
-    if "/json/" in msg_topic:
         try:
-            return payload_bytes.decode("utf-8", errors="replace")[:120]
+            return payload[:60].decode("utf-8", errors="replace")
         except Exception:
-            return format_payload(payload_bytes)
+            return f"<{len(payload)}B>"
+    if "/json/" in topic:
+        try:
+            return payload.decode("utf-8", errors="replace")[:120]
+        except Exception:
+            return f"<{len(payload)}B>"
     try:
-        envelope = mqtt_pb2.ServiceEnvelope()
-        envelope.ParseFromString(payload_bytes)
-        pkt = envelope.packet
+        env = mqtt_pb2.ServiceEnvelope()
+        env.ParseFromString(payload)
+        pkt = env.packet
     except Exception as e:
-        return f"[proto parse err: {e}]"
-
-    from_node = getattr(pkt, 'from')
-    node_str = f"!{from_node:08x}"
-
-    if pkt.HasField('encrypted'):
-        subtopic = get_subtopic(msg_topic)
-        parts = subtopic.split('/')
-        channel = parts[2] if len(parts) > 2 else "LongFast"
-        key = _expand_psk(CHANNEL_KEYS.get(channel, "AQ=="))
+        return f"[proto err: {e}]"
+    from_node = getattr(pkt, "from")
+    node = f"!{from_node:08x}"
+    if pkt.HasField("encrypted"):
+        parts = topic.split("/")
+        ch = parts[4] if len(parts) > 4 else "LongFast"
+        key = _expand_psk(CHANNEL_KEYS.get(ch, "AQ=="))
         plain = _aes_ctr_decrypt(bytes(pkt.encrypted), pkt.id, from_node, key)
         if plain is None:
-            return f"{node_str} [decrypt failed]"
+            return f"{node} [encrypted {len(pkt.encrypted)}B]"
         try:
             data = mesh_pb2.Data()
             data.ParseFromString(plain)
-            return f"{node_str} {_decode_data(data)}"
-        except Exception as e:
-            return f"{node_str} [decrypt ok, proto fail: {e}]"
-
-    if pkt.HasField('decoded'):
-        return f"{node_str} {_decode_data(pkt.decoded)}"
-
-    return f"[no payload field]"
+            return f"{node} {_decode_data(data)}"
+        except Exception:
+            return f"{node} [decrypt ok, parse fail]"
+    if pkt.HasField("decoded"):
+        return f"{node} {_decode_data(pkt.decoded)}"
+    return f"{node} [no payload]"
 
 
-
-def short_hash(topic, payload_bytes):
-    """Generate short hash for display (canonical topic, same algo as relay.py)"""
-    # Normalize: strip bridge_in/ prefix for canonical hash
-    canonical = topic.replace("bridge_in/", "").replace("relay/", "")
-    h = hashlib.sha256()
-    h.update(canonical.encode("utf-8"))
-    h.update(payload_bytes)
-    return h.hexdigest()[:12]
-
-
-def format_payload(payload_bytes):
-    """Format payload for display, handling binary data"""
-    try:
-        text = payload_bytes.decode("utf-8")
-    except UnicodeDecodeError:
-        text = f"<binary {len(payload_bytes)}B: {payload_bytes[:20].hex()}…>"
-    if len(text) > 60:
-        return f"{text[:60]}… ({len(payload_bytes)}B)"
-    return text
-
-
-def get_subtopic(topic):
-    """Extract subtopic after the ID/ part"""
-    # msh/bridge_in/ID/2/json/... → 2/json/...
-    # msh/ID/2/json/...           → 2/json/...
-    # msh/relay/ID/2/json/...     → 2/json/...
-    if "ID/" in topic:
-        return topic.split("ID/", 1)[1]
+def get_subtopic(topic: str) -> str:
+    if "/ID/" in topic:
+        return topic.split("/ID/", 1)[1]
     return topic
 
 
-def print_stats():
-    """Print current stats summary"""
-    with stats_lock:
-        total_raw = stats["bridge_in"]
-        total_clean = stats["clean"]
-        total_relay = stats["relayed"]
-        dedup_count = total_raw - total_clean
-        if dedup_count < 0:
-            dedup_count = 0
-        dedup_pct = (dedup_count / total_raw * 100) if total_raw > 0 else 0
+# ---------------------------------------------------------------------------
+# MQTT monitor
+# ---------------------------------------------------------------------------
 
-        print(f"\033[90m{'─'*70}\033[0m")
-        print(
-            f"\033[1m  📊 STATS │ "
-            f"\033[93mRAW: {total_raw}\033[0m\033[1m │ "
-            f"\033[96mCLEAN: {total_clean}\033[0m\033[1m │ "
-            f"\033[92mOUT: {total_relay}\033[0m\033[1m │ "
-            f"\033[91mDEDUP: {dedup_count} ({dedup_pct:.1f}%)\033[0m"
-        )
+COLORS = {"LOCAL": "\033[96m", "UP_A": "\033[93m", "UP_B": "\033[95m"}
+ICONS = {"LOCAL": "\U0001f4e6", "UP_A": "\U0001f4e5", "UP_B": "\U0001f4e5"}
+RESET = "\033[0m"
+DUP = "\033[91m"   # red
+NEW = "\033[92m"   # green
 
-        # Top subtopics
-        if per_subtopic:
-            sorted_topics = sorted(
-                per_subtopic.items(),
-                key=lambda x: x[1]["bridge_in"],
-                reverse=True
-            )[:5]
-            print(f"\033[90m  ───────────────────────────────────────────────\033[0m")
-            print(f"\033[1m  📋 TOP TOPICS:\033[0m")
-            for sub, counts in sorted_topics:
-                dedup = counts["bridge_in"] - counts["clean"]
-                if dedup < 0:
-                    dedup = 0
-                short = sub[:35] + "…" if len(sub) > 35 else sub
-                print(
-                    f"     {short:37s} "
-                    f"\033[93mraw:{counts['bridge_in']:>4}\033[0m "
-                    f"\033[96mclean:{counts['clean']:>4}\033[0m "
-                    f"\033[92mout:{counts['relayed']:>4}\033[0m "
-                    f"\033[91mdedup:{dedup:>4}\033[0m"
-                )
-        print(f"\033[90m{'─'*70}\033[0m")
-        print()
-
-
-# Registry of active paho clients for clean shutdown
-_clients = []
+_clients: list[paho_mqtt.Client] = []
 _clients_lock = threading.Lock()
 
 
-def monitor_topic(label, topic):
-    """Monitor a single topic pattern using paho-mqtt (handles binary payloads correctly)."""
-    colors = {
-        "BRIDGE_IN": "\033[93m",  # Yellow
-        "CLEAN":     "\033[96m",  # Cyan
-        "RELAYED":   "\033[92m",  # Green
-    }
-    icons    = {"BRIDGE_IN": "📥", "CLEAN": "📦", "RELAYED": "📤"}
-    stat_keys = {"BRIDGE_IN": "bridge_in", "CLEAN": "clean", "RELAYED": "relayed"}
-    color    = colors.get(label, "\033[0m")
-    icon     = icons.get(label, "📦")
-    stat_key = stat_keys.get(label, "bridge_in")
-    reset    = "\033[0m"
-    msg_count = [0]
+def monitor_broker(cfg: BrokerCfg) -> None:
+    color = COLORS.get(cfg.label, "")
+    icon = ICONS.get(cfg.label, "*")
 
     def on_connect(client, userdata, flags, reason_code, properties):
-        if reason_code.is_failure:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ {label} connect failed: {reason_code}")
-        else:
-            client.subscribe(topic, qos=0)
+        if reason_code.is_failure if hasattr(reason_code, "is_failure") else reason_code != 0:
+            print(f"[{datetime.now():%H:%M:%S}] {color}{cfg.label}{RESET} connect failed: {reason_code}")
+            return
+        client.subscribe(TOPIC_ROOT, qos=0)
+        print(f"[{datetime.now():%H:%M:%S}] {color}{cfg.label}{RESET} connected to {cfg.host}:{cfg.port}, subscribed {TOPIC_ROOT}")
 
     def on_disconnect(client, userdata, flags, reason_code, properties):
-        if reason_code.value != 0:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️  {label} disconnected ({reason_code}), reconnecting…")
+        rc = reason_code.value if hasattr(reason_code, "value") else reason_code
+        if rc != 0:
+            print(f"[{datetime.now():%H:%M:%S}] {color}{cfg.label}{RESET} disconnected ({reason_code}), reconnecting…")
 
     def on_message(client, userdata, message):
-        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        msg_topic       = message.topic
-        msg_payload_bytes = message.payload  # bytes — no newline splitting!
-
-        subtopic = get_subtopic(msg_topic)
-        h = short_hash(msg_topic, msg_payload_bytes)
+        ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        topic = message.topic
+        payload = message.payload
+        sub = get_subtopic(topic)
+        h = canonical_hash(topic, payload)
+        prev = check_seen(h, cfg.label)
 
         with stats_lock:
-            stats[stat_key] += 1
-            per_subtopic[subtopic][stat_key] += 1
+            stats.received[cfg.label] += 1
+            if prev is None:
+                stats.first_seen[cfg.label] += 1
+                stats.per_subtopic_first[sub] += 1
+            else:
+                stats.duplicates[cfg.label] += 1
+                stats.per_subtopic_dup[sub] += 1
 
-        msg_count[0] += 1
-        display_payload = decode_payload(msg_topic, msg_payload_bytes)
-
+        if prev is None:
+            tag = f"{NEW}NEW{RESET}"
+            extra = ""
+        else:
+            tag = f"{DUP}DUP{RESET}"
+            extra = f" \033[90m(prev: {prev}){RESET}"
+        body = decode_payload(topic, payload)
         print(
-            f"{color}{icon} [{timestamp}] [{label:<9s}]{reset} "
-            f"\033[36m{subtopic}\033[0m "
-            f"\033[90m#{h}\033[0m "
-            f"│ {display_payload}"
+            f"{color}{icon} [{ts}] [{cfg.label:<5}]{RESET} {tag} "
+            f"\033[36m{sub}\033[0m \033[90m#{h[:12]}\033[0m{extra} | {body}"
         )
-
-        if msg_count[0] % 30 == 0:
-            print_stats()
 
     try:
         try:
             client = paho_mqtt.Client(
                 callback_api_version=paho_mqtt.CallbackAPIVersion.VERSION2,
-                client_id=f"monitor-{label.lower()}-{os.getpid()}"
+                client_id=f"monitor-{cfg.label.lower()}-{os.getpid()}",
             )
         except (AttributeError, TypeError):
-            client = paho_mqtt.Client(client_id=f"monitor-{label.lower()}-{os.getpid()}")
+            client = paho_mqtt.Client(client_id=f"monitor-{cfg.label.lower()}-{os.getpid()}")
 
-        if BROKER["user"] and BROKER["pass"]:
-            client.username_pw_set(BROKER["user"], BROKER["pass"])
-        client.on_connect    = on_connect
+        if cfg.user and cfg.password:
+            client.username_pw_set(cfg.user, cfg.password)
+        if cfg.tls:
+            client.tls_set(cert_reqs=ssl.CERT_NONE)
+            client.tls_insecure_set(True)
+        client.on_connect = on_connect
         client.on_disconnect = on_disconnect
-        client.on_message    = on_message
+        client.on_message = on_message
         client.reconnect_delay_set(min_delay=1, max_delay=30)
-        client.connect(BROKER["host"], BROKER["port"], keepalive=60)
+        client.connect(cfg.host, cfg.port, keepalive=60)
         with _clients_lock:
             _clients.append(client)
         client.loop_forever()
-        with _clients_lock:
-            _clients.remove(client)
     except Exception as e:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ {label} error: {e}")
+        print(f"[{datetime.now():%H:%M:%S}] {color}{cfg.label}{RESET} error: {e}")
 
 
-def stats_printer():
-    """Print stats periodically"""
-    import time
+# ---------------------------------------------------------------------------
+# /metrics poller
+# ---------------------------------------------------------------------------
+
+_METRIC_KEYS = (
+    "mqtt_relay_messages_received_total",
+    "mqtt_relay_messages_relayed_total",
+    "mqtt_relay_messages_dropped_total",
+    "mqtt_relay_dedup_cache_size",
+    "mqtt_relay_up",
+    "mqtt_relay_upstream_connected",
+)
+
+
+def parse_metrics(text: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        if not any(line.startswith(k) for k in _METRIC_KEYS):
+            continue
+        try:
+            name_lbl, val = line.rsplit(" ", 1)
+        except ValueError:
+            continue
+        out[name_lbl] = val
+    return out
+
+
+def metrics_poller() -> None:
+    if not METRICS_URL:
+        return
+    while True:
+        time.sleep(30)
+        try:
+            with urllib.request.urlopen(METRICS_URL, timeout=5) as resp:
+                txt = resp.read().decode("utf-8", errors="replace")
+        except Exception as e:
+            print(f"\n\033[90m[metrics] poll failed: {e}\033[0m\n")
+            continue
+        m = parse_metrics(txt)
+        if not m:
+            continue
+        print_summary(extra_metrics=m)
+
+
+# ---------------------------------------------------------------------------
+# Pretty summary
+# ---------------------------------------------------------------------------
+
+def print_summary(extra_metrics: dict[str, str] | None = None) -> None:
+    with stats_lock:
+        rec = dict(stats.received)
+        first = dict(stats.first_seen)
+        dup = dict(stats.duplicates)
+        top = sorted(
+            ((s, stats.per_subtopic_first[s] + stats.per_subtopic_dup[s]) for s in
+             set(stats.per_subtopic_first) | set(stats.per_subtopic_dup)),
+            key=lambda x: x[1], reverse=True,
+        )[:5]
+        first_per_sub = dict(stats.per_subtopic_first)
+        dup_per_sub = dict(stats.per_subtopic_dup)
+
+    total_rx = sum(rec.values())
+    total_first = sum(first.values())
+    total_dup = sum(dup.values())
+    pct = (total_dup / total_rx * 100) if total_rx else 0.0
+
+    print(f"\033[90m{'─'*78}\033[0m")
+    print(
+        f"\033[1m  STATS  RX:{total_rx}  NEW:{NEW}{total_first}{RESET}\033[1m  "
+        f"DUP:{DUP}{total_dup}{RESET}\033[1m  ({pct:.1f}%)\033[0m"
+    )
+    for label in ("LOCAL", "UP_A", "UP_B"):
+        if label in rec:
+            color = COLORS.get(label, "")
+            print(
+                f"    {color}{label:<5}{RESET}  rx:{rec[label]:>5}  "
+                f"new:{NEW}{first.get(label,0):>5}{RESET}  "
+                f"dup:{DUP}{dup.get(label,0):>5}{RESET}"
+            )
+    if top:
+        print("  TOP TOPICS:")
+        for sub, _ in top:
+            print(
+                f"    {sub[:50]:<50}  "
+                f"new:{NEW}{first_per_sub.get(sub,0):>4}{RESET}  "
+                f"dup:{DUP}{dup_per_sub.get(sub,0):>4}{RESET}"
+            )
+    if extra_metrics:
+        print("  RELAY /metrics:")
+        for k, v in sorted(extra_metrics.items()):
+            print(f"    \033[90m{k} = {v}\033[0m")
+    print(f"\033[90m{'─'*78}\033[0m\n")
+
+
+def periodic_summary() -> None:
     while True:
         time.sleep(30)
         with stats_lock:
-            if stats["bridge_in"] > 0 or stats["clean"] > 0:
-                print_stats()
+            if sum(stats.received.values()) == 0:
+                continue
+        print_summary()
 
 
-def main():
-    print("\033[1m" + "=" * 70 + "\033[0m")
-    print("\033[1m  🔄 MQTT RELAY MONITOR v2 — Deduplication Tracker\033[0m")
-    print("\033[1m" + "=" * 70 + "\033[0m")
-    print(f"  📡 Broker  : {BROKER['host']}:{BROKER['port']}")
-    print(f"  🕐 Started : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("\033[90m" + "-" * 70 + "\033[0m")
-    print("  Topics:")
-    print(f"  \033[93m📥 BRIDGE_IN : {TOPICS['BRIDGE_IN']}\033[0m  — raw dari bridge, 2x dups")
-    print(f"  \033[96m📦 CLEAN     : {TOPICS['CLEAN']}\033[0m  — deduped untuk client")
-    print(f"  \033[92m📤 RELAYED   : {TOPICS['RELAYED']}\033[0m  — outbound ke bridge")
-    print("\033[90m" + "-" * 70 + "\033[0m")
-    print("  Libraries:")
-    proto_st = "\033[92m✓ meshtastic\033[0m" if _PROTO_AVAILABLE else "\033[91m✗ pip install meshtastic\033[0m"
-    crypto_st = "\033[92m✓ cryptography\033[0m" if _CRYPTO_AVAILABLE else "\033[91m✗ pip install cryptography\033[0m"
-    print(f"  📦 Proto decode : {proto_st}")
-    print(f"  🔑 AES decrypt  : {crypto_st}")
-    print("\033[90m" + "-" * 70 + "\033[0m")
-    print("  ℹ️  Relay bekerja jika RAW >> CLEAN (duplikat dibuang)")
-    print("  ℹ️  Ratio ideal : CLEAN ≈ RAW/2 (2 bridge aktif)")
-    print("\033[90m" + "-" * 70 + "\033[0m")
-    print("  Press Ctrl+C to stop")
-    print("\033[1m" + "=" * 70 + "\033[0m")
-    print()
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    print("\033[1m" + "=" * 78 + "\033[0m")
+    print("\033[1m  MQTT RELAY MONITOR v3 — multi-broker dedup tracker\033[0m")
+    print("\033[1m" + "=" * 78 + "\033[0m")
+    print(f"  Topic        : {TOPIC_ROOT}")
+    print(f"  Dedup window : {DEDUP_WINDOW}s")
+    print(f"  Metrics      : {METRICS_URL or '(disabled)'}")
+    print(f"  Proto decode : {'ok' if _PROTO_AVAILABLE else 'install meshtastic'}")
+    print(f"  AES decrypt  : {'ok' if _CRYPTO_AVAILABLE else 'install cryptography'}")
+    print("\033[90m" + "-" * 78 + "\033[0m")
+    if not BROKERS:
+        print("  no brokers configured — set LOCAL/UPSTREAM_A/UPSTREAM_B env vars")
+        sys.exit(2)
+    for b in BROKERS:
+        c = COLORS.get(b.label, "")
+        print(f"  {c}{b.label:<5}{RESET} {b.host}:{b.port}  tls={b.tls}  user={b.user or '-'}")
+    print("\033[90m" + "-" * 78 + "\033[0m")
+    print("  NEW = first time this canonical hash is seen across all brokers")
+    print("  DUP = same hash already seen on another broker (or echo) within window")
+    print("\033[1m" + "=" * 78 + "\033[0m\n")
 
     threads = []
+    for cfg in BROKERS:
+        t = threading.Thread(target=monitor_broker, args=(cfg,), daemon=True)
+        t.start()
+        threads.append(t)
 
-    # Monitor raw bridge inbound
-    t1 = threading.Thread(
-        target=monitor_topic, args=("BRIDGE_IN", TOPICS["BRIDGE_IN"])
-    )
-    t1.daemon = True
-    t1.start()
-    threads.append(t1)
-
-    # Monitor clean deduped
-    t2 = threading.Thread(
-        target=monitor_topic, args=("CLEAN", TOPICS["CLEAN"])
-    )
-    t2.daemon = True
-    t2.start()
-    threads.append(t2)
-
-    # Monitor outbound relay
-    t3 = threading.Thread(
-        target=monitor_topic, args=("RELAYED", TOPICS["RELAYED"])
-    )
-    t3.daemon = True
-    t3.start()
-    threads.append(t3)
-
-    # Periodic stats
-    t4 = threading.Thread(target=stats_printer)
-    t4.daemon = True
-    t4.start()
+    threading.Thread(target=periodic_summary, daemon=True).start()
+    threading.Thread(target=metrics_poller, daemon=True).start()
 
     try:
         for t in threads:
@@ -411,8 +565,8 @@ def main():
                     c.disconnect()
                 except Exception:
                     pass
-        print_stats()
-        print("🛑 Stopped by user")
+        print_summary()
+        print("stopped")
         sys.exit(0)
 
 

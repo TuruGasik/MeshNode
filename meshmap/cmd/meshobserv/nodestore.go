@@ -368,7 +368,7 @@ func handleNodeSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit := 50
-	if v, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && v > 0 && v <= 200 {
+	if v, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && v > 0 && v <= 1000 {
 		limit = v
 	}
 	nodeStoreMu.Lock()

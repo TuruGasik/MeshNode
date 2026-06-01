@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>MeshNode Tracker</title>
-  <link rel="stylesheet" href="/css/tracker.css">
+  <link rel="stylesheet" href="/css/tracker.css?v=20260510-2">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 </head>
 <body>
@@ -40,13 +40,16 @@
           Auto-refresh (30s)
         </label>
       </div>
+      <div class="search-box">
+        <input type="search" id="node-search" placeholder="Cari node..." autocomplete="off">
+      </div>
       <div id="node-list"></div>
     </div>
     <div id="map"></div>
   </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="/js/tracker.js"></script>
+  <script src="/js/tracker.js?v=20260510-2"></script>
 </body>
 </html>
 </body>

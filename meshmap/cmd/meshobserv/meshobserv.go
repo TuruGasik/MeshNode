@@ -200,8 +200,9 @@ func handleMessage(from uint32, topic string, portNum generated.PortNum, payload
 }
 
 func main() {
-	var dbPath, blockedPath, broker, username, password, trackerPassword string
+	var dbPath, sqlitePath, blockedPath, broker, username, password, trackerPassword string
 	flag.StringVar(&dbPath, "f", "", "node database `file`")
+	flag.StringVar(&sqlitePath, "db", "/data/nodes.db", "SQLite node store `file`")
 	flag.StringVar(&blockedPath, "b", "", "node blocklist `file`")
 	flag.StringVar(&broker, "m", "tcp://mqtt.meshtastic.org:1883", "MQTT broker `URL`")
 	flag.StringVar(&username, "u", "meshdev", "MQTT broker `username`")
@@ -224,7 +225,7 @@ func main() {
 		log.Printf("[info] loaded %v nodes from disk", len(Nodes))
 	}
 	// init SQLite node store
-	if err := InitNodeStore("/data/nodes.db"); err != nil {
+	if err := InitNodeStore(sqlitePath); err != nil {
 		log.Fatalf("[fatal] init nodestore: %v", err)
 	}
 	defer CloseNodeStore()

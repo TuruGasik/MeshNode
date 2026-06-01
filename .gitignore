@@ -6,4 +6,20 @@ meshmap/data/
 !.env.example
 docs/
 mqtt-relay/mqtt-relay
+node_modules/
 *.db
+__pycache__/
+*.py[cod]
+scripts/*
+migrasi/*
+
+# TLS / private keys
+certs/
+mosquitto/
+*.pem
+*.key
+!*.pub.key
+
+# autonotif build artefacts & runtime data (PKI keys, node keys, state, db)
+autonotif/autonotif
+autonotif/data/

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync/atomic"
+	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
@@ -46,22 +47,26 @@ type publishTarget struct {
 
 // Relay handles MQTT message routing and deduplication.
 type Relay struct {
-	config    *Config
-	dedup     *DedupStore
-	stats     *Stats
-	onMessage func() // callback for health tracking
-	local     mqtt.Client
-	upA       mqtt.Client
-	upB       mqtt.Client
+	config         *Config
+	dedup          *DedupStore
+	stats          *Stats
+	onMessage      func() // callback for health tracking
+	local          mqtt.Client
+	upA            mqtt.Client
+	upB            mqtt.Client
+	publishQoS     byte
+	publishTimeout time.Duration
 }
 
 // NewRelay creates a new Relay instance.
 func NewRelay(cfg *Config, dedup *DedupStore, onMessage func()) *Relay {
 	return &Relay{
-		config:    cfg,
-		dedup:     dedup,
-		stats:     &Stats{},
-		onMessage: onMessage,
+		config:         cfg,
+		dedup:          dedup,
+		stats:          &Stats{},
+		onMessage:      onMessage,
+		publishQoS:     0,
+		publishTimeout: 5 * time.Second,
 	}
 }
 
@@ -109,7 +114,7 @@ func (r *Relay) handleMessage(source string, msg mqtt.Message) {
 		return
 	}
 
-	msgHash := Hash(topic, payload)
+	msgHash := CanonicalHash(topic, payload)
 	seen := r.dedup.CheckAndStore(msgHash, source)
 	targets, direction := r.targetsFor(source, seen)
 	if len(targets) == 0 {
@@ -126,8 +131,16 @@ func (r *Relay) handleMessage(source string, msg mqtt.Message) {
 	}
 
 	for _, target := range targets {
-		token := target.client.Publish(topic, 0, false, payload)
-		token.Wait()
+		token := target.client.Publish(topic, r.publishQoS, msg.Retained(), payload)
+		if !token.WaitTimeout(r.publishTimeout) {
+			slog.Warn("Publish timed out",
+				"dir", direction,
+				"topic", topic,
+				"target", target.label,
+				"timeout", r.publishTimeout,
+			)
+			continue
+		}
 		if err := token.Error(); err != nil {
 			slog.Warn("Publish failed",
 				"dir", direction,
@@ -142,7 +155,7 @@ func (r *Relay) handleMessage(source string, msg mqtt.Message) {
 	if source == sourceLocal {
 		r.stats.RelayedOut.Add(int64(len(targets)))
 	} else {
-		r.stats.RelayedIn.Add(1)
+		r.stats.RelayedIn.Add(int64(len(targets)))
 	}
 
 	slog.Debug("RELAY",
@@ -153,9 +166,6 @@ func (r *Relay) handleMessage(source string, msg mqtt.Message) {
 		"bytes", len(payload),
 		"hash", msgHash[:12],
 	)
-	if seen.IsNew {
-		return
-	}
 }
 
 func (r *Relay) targetsFor(source string, seen SeenResult) ([]publishTarget, string) {
@@ -163,25 +173,50 @@ func (r *Relay) targetsFor(source string, seen SeenResult) ([]publishTarget, str
 		return client != nil && client.IsConnected()
 	}
 
+	// Echo / loop suppression: if this exact canonical packet was seen recently
+	// from any broker, drop it. This is what prevents an A→B forward from
+	// being echoed back as B→A (and so on) into a loop.
+	if !seen.IsNew {
+		return nil, directionFor(source)
+	}
+
+	// 3-way mesh: forward each new packet to every OTHER connected broker.
+	var targets []publishTarget
 	switch source {
 	case sourceLocal:
-		var targets []publishTarget
 		if connected(r.upA) {
 			targets = append(targets, publishTarget{client: r.upA, label: sourceUpA})
 		}
 		if connected(r.upB) {
 			targets = append(targets, publishTarget{client: r.upB, label: sourceUpB})
 		}
-		return targets, "OUT"
-	case sourceUpA, sourceUpB:
-		if !connected(r.local) {
-			return nil, "IN"
+	case sourceUpA:
+		if connected(r.local) {
+			targets = append(targets, publishTarget{client: r.local, label: sourceLocal})
 		}
-		if !seen.IsNew {
-			return nil, "IN"
+		if connected(r.upB) {
+			targets = append(targets, publishTarget{client: r.upB, label: sourceUpB})
 		}
-		return []publishTarget{{client: r.local, label: sourceLocal}}, "IN"
+	case sourceUpB:
+		if connected(r.local) {
+			targets = append(targets, publishTarget{client: r.local, label: sourceLocal})
+		}
+		if connected(r.upA) {
+			targets = append(targets, publishTarget{client: r.upA, label: sourceUpA})
+		}
 	default:
 		return nil, "UNKNOWN"
+	}
+	return targets, directionFor(source)
+}
+
+func directionFor(source string) string {
+	switch source {
+	case sourceLocal:
+		return "OUT"
+	case sourceUpA, sourceUpB:
+		return "RELAY"
+	default:
+		return "UNKNOWN"
 	}
 }

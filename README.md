@@ -10,6 +10,7 @@ MeshNode Indonesia stack berbasis **EMQX + MeshMap** untuk jaringan Meshtastic.
 - ✅ TLS MQTT (`8883`)
 - ✅ EMQX Dashboard HTTP (`18083`) + HTTPS (`18084`)
 - ✅ MeshMap (`meshmap`)
+- ✅ AutoNotif BMKG/INATEWS2 → channel Meshtastic + responder DM (`autonotif`)
 
 ### Phase 2 (aktif, opsional via profile)
 - ✅ `mqtt-relay` deduplication (profile `phase2-relay`)
@@ -30,9 +31,13 @@ Saat relay aktif, topik `msh/ID/#` dipakai di:
 - `docker-compose.yml` → stack aktif
 - `emqx/acl.conf` → ACL runtime EMQX
 - `emqx/users.conf` → bootstrap user EMQX (CSV)
-- `emqx/certs/` → TLS cert/key (`fullchain.pem`, `privkey.pem`)
-- `meshmap/` → source + Docker build MeshMap
-- `mqtt-relay/` → source relay multi-broker + dedup
+- `emqx/base.hocon` → base config EMQX (listener, dashboard, dll)
+- `certs/letsencrypt/` → TLS cert publik (`fullchain.pem`, `privkey.pem`) untuk listener MQTTS `8883`
+- `certs/cloudflare/` → TLS cert origin Cloudflare untuk dashboard EMQX `18084` & nginx meshmap
+- `meshmap/` → source + Docker build MeshMap (Go API + nginx + frontend)
+- `mqtt-relay/` → source relay multi-broker + dedup (Phase 2)
+- `autonotif/` → service notifikasi BMKG/INATEWS2 ke channel Meshtastic + responder DM
+- `scripts/` → monitor multi-broker & pipeline relay
 - `migrasi/` → dokumen migration plan/history
 
 ## Requirement
@@ -68,14 +73,17 @@ docker compose ps
 
 - MQTT: `1883`
 - MQTT TLS: `8883`
-- EMQX Dashboard HTTP: `http://<host>:18083`
-- EMQX Dashboard HTTPS: `https://<host>:18084`
-- MeshMap: `https://<domain>` (ports `80/443`)
+- EMQX Dashboard HTTP: `http://127.0.0.1:18083` (bind localhost)
+- EMQX Dashboard HTTPS: `https://127.0.0.1:18084` (bind localhost)
+- MeshMap nginx: `80/443` (publik)
+- MeshMap meshobserv API: `http://127.0.0.1:8080` (bind localhost)
+- mqtt-relay health/metrics: `http://127.0.0.1:8081/health` & `/metrics` (bind localhost, profile `phase2-relay`)
 
 ## Catatan Dashboard EMQX
 
 - User default dashboard: `admin`
 - Password admin harus diganti setelah deploy awal.
+- Opsional untuk EMQX Enterprise 6.2.0: isi `EMQX_LICENSE_KEY` di `.env` agar license diterapkan via `EMQX_LICENSE__KEY`.
 - Reset password admin via CLI container:
 
 ```bash
@@ -91,18 +99,22 @@ Script helper:
 ```
 
 Script ini akan:
-- copy cert LetsEncrypt ke `emqx/certs/`
-- set permission yang cocok untuk user `emqx` di container
-- restart `meshnode-mqtt` dan `meshmap`
+- copy cert Let's Encrypt dari `/etc/letsencrypt/live/<domain>/` ke `certs/letsencrypt/`
+- set ownership ke UID 1000 (user `emqx` di container) dengan permission `644` untuk `fullchain.pem` dan `600` untuk `privkey.pem`
+- restart container `meshnode-mqtt` agar listener TLS load cert baru
+
+Untuk cert dashboard EMQX (`18084`) dan nginx meshmap, taruh manual di `certs/cloudflare/`.
 
 ## Konfigurasi ACL
 
 File: `emqx/acl.conf`
 
 Contoh rule aktif saat ini:
-- `idmeshnode`: full access ke `msh/ID/#`
-- `meshmap`: subscribe only ke `msh/ID/#`
+- `kemplu`: superuser, full access ke semua topic + `$SYS/#`
+- `idmeshnode`: full access ke `msh/#`
+- `meshmap`: subscribe only ke `msh/ID/#` + `$SYS/#`
 - `mqtt-relay`: subscribe/publish ke `msh/ID/#`
+- `BMKGGempa`: subscribe/publish ke `msh/ID/2/#` (dipakai service `autonotif`)
 - default: deny
 
 Setelah ubah ACL, apply dengan:

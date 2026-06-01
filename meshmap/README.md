@@ -42,6 +42,28 @@ docker compose build meshmap
 docker compose up -d meshmap
 ```
 
+## Development Mode
+Frontend bisa dijalankan lokal pakai Vite watcher:
+
+```bash
+cd meshmap
+npm install
+npm run dev
+```
+
+Buka `http://localhost:5178/` atau `http://localhost:5178/tracker.html`.
+Proxy `/api/*` default ke `http://127.0.0.1:8080`; kalau backend ada di host lain, set `VITE_API_TARGET`.
+
+
+Untuk menjalankan API Go + watcher sekaligus:
+
+```bash
+cd meshmap
+npm run dev:full
+```
+
+Detail lengkap ada di `README.dev.md`.
+
 ## Go Module
 Module: `meshnode.id/meshmap`  
 Build: Go 1.25, CGO_ENABLED=0, pure Go SQLite ([modernc.org/sqlite](https://modernc.org/sqlite))

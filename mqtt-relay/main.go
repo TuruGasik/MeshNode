@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
@@ -18,59 +21,114 @@ import (
 )
 
 // Config holds all configuration loaded from environment variables.
-// 100% compatible with the Python relay.py env vars.
 type Config struct {
-	LocalBrokerHost     string
-	LocalBrokerPort     int
-	LocalBrokerUsername string
-	LocalBrokerPassword string
-	UpstreamABrokerHost string
-	UpstreamABrokerPort int
-	UpstreamABrokerUser string
-	UpstreamABrokerPass string
-	UpstreamBBrokerHost string
-	UpstreamBBrokerPort int
-	UpstreamBBrokerUser string
-	UpstreamBBrokerPass string
-	TopicRoot           string
-	DedupTTL            int
-	CleanupInterval     int
-	LogLevel            string
+	LocalBrokerHost          string
+	LocalBrokerPort          int
+	LocalBrokerTLS           bool
+	LocalBrokerTLSServerName string
+	LocalBrokerUsername      string
+	LocalBrokerPassword      string
+	UpstreamABrokerHost      string
+	UpstreamABrokerPort      int
+	UpstreamABrokerUser      string
+	UpstreamABrokerPass      string
+	UpstreamABrokerTLS       bool
+	UpstreamATLSServerName   string
+	UpstreamBBrokerHost      string
+	UpstreamBBrokerPort      int
+	UpstreamBBrokerUser      string
+	UpstreamBBrokerPass      string
+	UpstreamBBrokerTLS       bool
+	UpstreamBTLSServerName   string
+	TopicRoot                string
+	DedupTTL                 int
+	CleanupInterval          int
+	StatsInterval            int
+	PublishQoS               int
+	SubscribeQoS             int
+	PublishTimeout           int // milliseconds
+	HealthPort               int
+	ShutdownTimeoutMS        int
+	LogLevel                 string
 }
 
 // LoadConfig reads configuration from environment variables with defaults.
 func LoadConfig() *Config {
 	return &Config{
-		LocalBrokerHost:     getEnv("LOCAL_MQTT_HOST", "meshnode-mqtt"),
-		LocalBrokerPort:     getEnvInt("LOCAL_MQTT_PORT", 1883),
-		LocalBrokerUsername: getEnv("LOCAL_MQTT_USERNAME", "mqtt-relay"),
-		LocalBrokerPassword: getEnv("LOCAL_MQTT_PASSWORD", ""),
-		UpstreamABrokerHost: getEnv("UPSTREAM_A_HOST", "mqtt.meshnode.id"),
-		UpstreamABrokerPort: getEnvInt("UPSTREAM_A_PORT", 1883),
-		UpstreamABrokerUser: getEnv("UPSTREAM_A_USERNAME", "idmeshnode"),
-		UpstreamABrokerPass: getEnv("UPSTREAM_A_PASSWORD", "Mesh4all"),
-		UpstreamBBrokerHost: getEnv("UPSTREAM_B_HOST", "mqtt.meshtastic.org"),
-		UpstreamBBrokerPort: getEnvInt("UPSTREAM_B_PORT", 1883),
-		UpstreamBBrokerUser: getEnv("UPSTREAM_B_USERNAME", "meshdev"),
-		UpstreamBBrokerPass: getEnv("UPSTREAM_B_PASSWORD", "large4cats"),
-		TopicRoot:           getEnv("TOPIC_ROOT", "msh/ID/#"),
-		DedupTTL:            getEnvInt("DEDUP_TTL", 600),
-		CleanupInterval:     getEnvInt("CLEANUP_INTERVAL", 60),
-		LogLevel:            getEnv("LOG_LEVEL", "INFO"),
+		LocalBrokerHost:          getEnv("LOCAL_MQTT_HOST", "meshnode-mqtt"),
+		LocalBrokerPort:          getEnvInt("LOCAL_MQTT_PORT", 1883),
+		LocalBrokerTLS:           getEnvBool("LOCAL_MQTT_TLS", false),
+		LocalBrokerTLSServerName: getEnvAny([]string{"LOCAL_MQTT_TLS_SERVER_NAME", "MQTT_TLS_SERVER_NAME"}, ""),
+		LocalBrokerUsername:      getEnv("LOCAL_MQTT_USERNAME", ""),
+		LocalBrokerPassword:      getEnv("LOCAL_MQTT_PASSWORD", ""),
+		UpstreamABrokerHost:      getEnv("UPSTREAM_A_HOST", ""),
+		UpstreamABrokerPort:      getEnvInt("UPSTREAM_A_PORT", 1883),
+		UpstreamABrokerUser:      getEnv("UPSTREAM_A_USERNAME", ""),
+		UpstreamABrokerPass:      getEnv("UPSTREAM_A_PASSWORD", ""),
+		UpstreamABrokerTLS:       getEnvBool("UPSTREAM_A_TLS", false),
+		UpstreamATLSServerName:   getEnv("UPSTREAM_A_TLS_SERVER_NAME", ""),
+		UpstreamBBrokerHost:      getEnv("UPSTREAM_B_HOST", ""),
+		UpstreamBBrokerPort:      getEnvInt("UPSTREAM_B_PORT", 1883),
+		UpstreamBBrokerUser:      getEnv("UPSTREAM_B_USERNAME", ""),
+		UpstreamBBrokerPass:      getEnv("UPSTREAM_B_PASSWORD", ""),
+		UpstreamBBrokerTLS:       getEnvBool("UPSTREAM_B_TLS", false),
+		UpstreamBTLSServerName:   getEnv("UPSTREAM_B_TLS_SERVER_NAME", ""),
+		TopicRoot:                getEnv("TOPIC_ROOT", "msh/ID/#"),
+		DedupTTL:                 getEnvInt("DEDUP_TTL", 600),
+		CleanupInterval:          getEnvInt("CLEANUP_INTERVAL", 60),
+		StatsInterval:            getEnvInt("STATS_INTERVAL", 60),
+		PublishQoS:               getEnvInt("PUBLISH_QOS", 0),
+		SubscribeQoS:             getEnvInt("SUBSCRIBE_QOS", 0),
+		PublishTimeout:           getEnvInt("PUBLISH_TIMEOUT_MS", 5000),
+		HealthPort:               getEnvInt("HEALTH_PORT", 8081),
+		ShutdownTimeoutMS:        getEnvInt("SHUTDOWN_TIMEOUT_MS", 5000),
+		LogLevel:                 getEnv("LOG_LEVEL", "INFO"),
 	}
 }
 
 func (c *Config) TopicMatcher(topic string) bool {
-	if strings.HasSuffix(c.TopicRoot, "/#") {
-		prefix := strings.TrimSuffix(c.TopicRoot, "#")
-		return strings.HasPrefix(topic, prefix)
+	return matchMQTTTopic(c.TopicRoot, topic)
+}
+
+// matchMQTTTopic implements MQTT topic filter matching with both '+' (single
+// level) and '#' (multi level) wildcards. The filter must follow MQTT rules:
+// '#' may only appear as the last level, '+' must occupy a whole level.
+func matchMQTTTopic(filter, topic string) bool {
+	if filter == topic {
+		return true
 	}
-	return topic == c.TopicRoot
+	fParts := strings.Split(filter, "/")
+	tParts := strings.Split(topic, "/")
+	for i, fp := range fParts {
+		if fp == "#" {
+			// '#' matches the rest, but must be the final segment.
+			return i == len(fParts)-1
+		}
+		if i >= len(tParts) {
+			return false
+		}
+		if fp == "+" {
+			continue
+		}
+		if fp != tParts[i] {
+			return false
+		}
+	}
+	return len(fParts) == len(tParts)
 }
 
 func getEnv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+func getEnvAny(keys []string, fallback string) string {
+	for _, key := range keys {
+		if v := os.Getenv(key); v != "" {
+			return v
+		}
 	}
 	return fallback
 }
@@ -84,6 +142,25 @@ func getEnvInt(key string, fallback int) int {
 	return fallback
 }
 
+func getEnvBool(key string, fallback bool) bool {
+	if v := os.Getenv(key); v != "" {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "yes", "y", "on":
+			return true
+		case "0", "false", "no", "n", "off":
+			return false
+		}
+	}
+	return fallback
+}
+
+// UpstreamInfo holds per-upstream configuration and client reference.
+type UpstreamInfo struct {
+	Label  string
+	Host   string
+	Client mqtt.Client
+}
+
 // HealthState tracks the health of the relay service.
 type HealthState struct {
 	connected atomic.Bool
@@ -91,6 +168,7 @@ type HealthState struct {
 	startedAt time.Time
 	stats     *Stats
 	dedupSize func() int
+	upstreams []UpstreamInfo
 }
 
 // NewHealthState creates a new HealthState tracker.
@@ -100,6 +178,11 @@ func NewHealthState(stats *Stats, dedupSize func() int) *HealthState {
 		dedupSize: dedupSize,
 		startedAt: time.Now(),
 	}
+}
+
+// SetUpstreams registers upstream clients for health tracking.
+func (h *HealthState) SetUpstreams(upstreams []UpstreamInfo) {
+	h.upstreams = upstreams
 }
 
 // SetConnected updates the connection status.
@@ -131,6 +214,18 @@ func (h *HealthState) Status() map[string]any {
 		status = "healthy"
 	}
 
+	// Build per-upstream status map
+	upstreamsStatus := make(map[string]any, len(h.upstreams))
+	for _, u := range h.upstreams {
+		configured := u.Host != ""
+		isConnected := u.Client != nil && u.Client.IsConnected()
+		upstreamsStatus[u.Label] = map[string]any{
+			"configured": configured,
+			"connected":  isConnected,
+			"host":       u.Host,
+		}
+	}
+
 	return map[string]any{
 		"status":         status,
 		"reason":         reason,
@@ -142,6 +237,7 @@ func (h *HealthState) Status() map[string]any {
 			}
 			return time.Unix(lastMsgUnix, 0).UTC().Format(time.RFC3339)
 		}(),
+		"upstreams": upstreamsStatus,
 		"stats": map[string]int64{
 			"received":    h.stats.Received.Load(),
 			"from_local":  h.stats.FromLocal.Load(),
@@ -155,34 +251,90 @@ func (h *HealthState) Status() map[string]any {
 	}
 }
 
-// startHealthServer starts an HTTP server exposing /health endpoint.
+// startHealthServer starts an HTTP server exposing /health and /metrics endpoints.
 func startHealthServer(health *HealthState, addr string) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		data := health.Status()
 		status := data["status"].(string)
+		w.Header().Set("Content-Type", "application/json")
 		if status == "healthy" {
-			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 		} else {
-			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 		json.NewEncoder(w).Encode(data)
 	})
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		writeMetrics(w, health)
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/health" {
+		if r.URL.Path != "/health" && r.URL.Path != "/metrics" {
 			http.NotFound(w, r)
 			return
 		}
 	})
 
 	go func() {
-		slog.Info("Health server listening", "addr", addr)
+		slog.Info("Health server listening", "addr", addr, "endpoints", "/health,/metrics")
 		if err := http.ListenAndServe(addr, mux); err != nil {
 			slog.Error("Health server failed", "error", err)
 		}
 	}()
+}
+
+// writeMetrics renders relay metrics in Prometheus text exposition format.
+// No external dependencies — plain stdlib output.
+func writeMetrics(w io.Writer, h *HealthState) {
+	s := h.stats
+	connected := int64(0)
+	if h.connected.Load() {
+		connected = 1
+	}
+	uptime := int64(time.Since(h.startedAt).Seconds())
+	lastMsg := h.lastMsgAt.Load()
+
+	fmt.Fprintln(w, "# HELP mqtt_relay_up Local broker connection state (1=connected, 0=disconnected).")
+	fmt.Fprintln(w, "# TYPE mqtt_relay_up gauge")
+	fmt.Fprintf(w, "mqtt_relay_up %d\n", connected)
+
+	fmt.Fprintln(w, "# HELP mqtt_relay_uptime_seconds Process uptime in seconds.")
+	fmt.Fprintln(w, "# TYPE mqtt_relay_uptime_seconds counter")
+	fmt.Fprintf(w, "mqtt_relay_uptime_seconds %d\n", uptime)
+
+	fmt.Fprintln(w, "# HELP mqtt_relay_last_message_timestamp_seconds Unix timestamp of last received message.")
+	fmt.Fprintln(w, "# TYPE mqtt_relay_last_message_timestamp_seconds gauge")
+	fmt.Fprintf(w, "mqtt_relay_last_message_timestamp_seconds %d\n", lastMsg)
+
+	fmt.Fprintln(w, "# HELP mqtt_relay_messages_received_total Total messages received per source.")
+	fmt.Fprintln(w, "# TYPE mqtt_relay_messages_received_total counter")
+	fmt.Fprintf(w, "mqtt_relay_messages_received_total{source=\"local\"} %d\n", s.FromLocal.Load())
+	fmt.Fprintf(w, "mqtt_relay_messages_received_total{source=\"upstream_a\"} %d\n", s.FromUpA.Load())
+	fmt.Fprintf(w, "mqtt_relay_messages_received_total{source=\"upstream_b\"} %d\n", s.FromUpB.Load())
+
+	fmt.Fprintln(w, "# HELP mqtt_relay_messages_relayed_total Total messages relayed by direction.")
+	fmt.Fprintln(w, "# TYPE mqtt_relay_messages_relayed_total counter")
+	fmt.Fprintf(w, "mqtt_relay_messages_relayed_total{direction=\"in\"} %d\n", s.RelayedIn.Load())
+	fmt.Fprintf(w, "mqtt_relay_messages_relayed_total{direction=\"out\"} %d\n", s.RelayedOut.Load())
+
+	fmt.Fprintln(w, "# HELP mqtt_relay_messages_dropped_total Total messages dropped (duplicates / loop suppression).")
+	fmt.Fprintln(w, "# TYPE mqtt_relay_messages_dropped_total counter")
+	fmt.Fprintf(w, "mqtt_relay_messages_dropped_total %d\n", s.Dropped.Load())
+
+	fmt.Fprintln(w, "# HELP mqtt_relay_dedup_cache_size Current number of entries in the dedup cache.")
+	fmt.Fprintln(w, "# TYPE mqtt_relay_dedup_cache_size gauge")
+	fmt.Fprintf(w, "mqtt_relay_dedup_cache_size %d\n", h.dedupSize())
+
+	fmt.Fprintln(w, "# HELP mqtt_relay_upstream_connected Upstream connection state per label (1=connected).")
+	fmt.Fprintln(w, "# TYPE mqtt_relay_upstream_connected gauge")
+	for _, u := range h.upstreams {
+		v := int64(0)
+		if u.Client != nil && u.Client.IsConnected() {
+			v = 1
+		}
+		fmt.Fprintf(w, "mqtt_relay_upstream_connected{label=%q,host=%q} %d\n", u.Label, u.Host, v)
+	}
 }
 
 // parseSlogLevel converts a log level string to slog.Level.
@@ -229,18 +381,24 @@ func main() {
 	// Initialize dedup store
 	dedup := NewDedupStore(time.Duration(cfg.DedupTTL) * time.Second)
 
-	// Initialize health tracker
+	// Initialize relay first so health.stats is wired before the HTTP server starts.
 	health := NewHealthState(nil, dedup.Size)
-	startHealthServer(health, ":8081")
-
-	// Initialize relay with health callback
 	relay := NewRelay(cfg, dedup, health.Touch)
+	relay.publishQoS = byte(cfg.PublishQoS)
+	relay.publishTimeout = time.Duration(cfg.PublishTimeout) * time.Millisecond
 	health.stats = relay.stats
+
+	// HTTP health server (now safe — health.stats is set).
+	startHealthServer(health, fmt.Sprintf(":%d", cfg.HealthPort))
 
 	// Start cleanup goroutine
 	go dedup.CleanupLoop(time.Duration(cfg.CleanupInterval) * time.Second)
 
-	makeClient := func(name, broker, username, password string, handler mqtt.MessageHandler) mqtt.Client {
+	makeClient := func(name, broker, username, password string, useTLS bool, tlsServerName string, isLocal bool, handler mqtt.MessageHandler) mqtt.Client {
+		// Add up to ±2s of jitter to the retry interval so that multiple
+		// instances restarting together don't all reconnect on the same tick.
+		jitter := time.Duration(rand.Intn(2000)) * time.Millisecond
+		retryInterval := 5*time.Second + jitter
 		opts := mqtt.NewClientOptions().
 			AddBroker(broker).
 			SetClientID(name).
@@ -250,53 +408,98 @@ func main() {
 			SetAutoReconnect(true).
 			SetOrderMatters(false).
 			SetConnectRetry(true).
-			SetConnectRetryInterval(5 * time.Second).
+			SetConnectRetryInterval(retryInterval).
 			SetMaxReconnectInterval(30 * time.Second).
 			SetKeepAlive(60 * time.Second).
 			SetDefaultPublishHandler(handler).
 			SetOnConnectHandler(func(client mqtt.Client) {
 				slog.Info("Connected to MQTT broker", "name", name, "broker", broker)
-				if token := client.Subscribe(cfg.TopicRoot, 0, nil); token.Wait() && token.Error() != nil {
+				if token := client.Subscribe(cfg.TopicRoot, byte(cfg.SubscribeQoS), nil); token.Wait() && token.Error() != nil {
 					slog.Error("Failed to subscribe",
 						"name", name,
 						"topic", cfg.TopicRoot,
 						"error", token.Error(),
 					)
 				} else {
-					slog.Info("Subscribed", "name", name, "topic", cfg.TopicRoot)
+					slog.Info("Subscribed", "name", name, "topic", cfg.TopicRoot, "qos", cfg.SubscribeQoS)
 				}
-				health.SetConnected(true)
+				if isLocal {
+					health.SetConnected(true)
+				}
 			}).
 			SetConnectionLostHandler(func(client mqtt.Client, err error) {
 				slog.Warn("Connection lost, will auto-reconnect…", "name", name, "error", err)
-				if name == "mqtt-relay-local" {
+				if isLocal {
 					health.SetConnected(false)
 				}
 			}).
 			SetReconnectingHandler(func(client mqtt.Client, opts *mqtt.ClientOptions) {
-				slog.Info("Reconnecting to MQTT broker…", "name", name)
+				slog.Debug("Reconnecting to MQTT broker…", "name", name)
 			})
+		if useTLS {
+			opts.SetTLSConfig(&tls.Config{MinVersion: tls.VersionTLS12, ServerName: tlsServerName})
+		}
 
 		client := mqtt.NewClient(opts)
-		if token := client.Connect(); token.Wait() && token.Error() != nil {
-			slog.Error("Failed to connect to MQTT broker", "name", name, "error", token.Error())
-			os.Exit(1)
+		token := client.Connect()
+		token.Wait()
+		if err := token.Error(); err != nil {
+			if isLocal {
+				slog.Error("Failed to connect to local MQTT broker, exiting", "name", name, "error", err)
+				os.Exit(1)
+			}
+			// Upstream is non-fatal: SetConnectRetry(true) will keep retrying
+			// in the background and OnConnectHandler will subscribe once up.
+			slog.Warn("Initial connect failed, will keep retrying in background",
+				"name", name, "error", err,
+			)
 		}
 		return client
 	}
 
-	localBroker := fmt.Sprintf("tcp://%s:%d", cfg.LocalBrokerHost, cfg.LocalBrokerPort)
-	upstreamABroker := fmt.Sprintf("tcp://%s:%d", cfg.UpstreamABrokerHost, cfg.UpstreamABrokerPort)
-	upstreamBBroker := fmt.Sprintf("tcp://%s:%d", cfg.UpstreamBBrokerHost, cfg.UpstreamBBrokerPort)
+	scheme := func(useTLS bool) string {
+		if useTLS {
+			return "ssl"
+		}
+		return "tcp"
+	}
+	localBroker := fmt.Sprintf("%s://%s:%d", scheme(cfg.LocalBrokerTLS), cfg.LocalBrokerHost, cfg.LocalBrokerPort)
+	upstreamABroker := fmt.Sprintf("%s://%s:%d", scheme(cfg.UpstreamABrokerTLS), cfg.UpstreamABrokerHost, cfg.UpstreamABrokerPort)
+	upstreamBBroker := fmt.Sprintf("%s://%s:%d", scheme(cfg.UpstreamBBrokerTLS), cfg.UpstreamBBrokerHost, cfg.UpstreamBBrokerPort)
 
-	localClient := makeClient("mqtt-relay-local", localBroker, cfg.LocalBrokerUsername, cfg.LocalBrokerPassword, relay.HandleLocalMessage)
-	upstreamAClient := makeClient("mqtt-relay-upstream-a", upstreamABroker, cfg.UpstreamABrokerUser, cfg.UpstreamABrokerPass, relay.HandleUpstreamAMessage)
-	upstreamBClient := makeClient("mqtt-relay-upstream-b", upstreamBBroker, cfg.UpstreamBBrokerUser, cfg.UpstreamBBrokerPass, relay.HandleUpstreamBMessage)
+	localClient := makeClient("mqtt-relay-local", localBroker, cfg.LocalBrokerUsername, cfg.LocalBrokerPassword, cfg.LocalBrokerTLS, cfg.LocalBrokerTLSServerName, true, relay.HandleLocalMessage)
+
+	var upstreamAClient mqtt.Client
+	if cfg.UpstreamABrokerHost != "" {
+		upstreamAClient = makeClient("mqtt-relay-upstream-a", upstreamABroker, cfg.UpstreamABrokerUser, cfg.UpstreamABrokerPass, cfg.UpstreamABrokerTLS, cfg.UpstreamATLSServerName, false, relay.HandleUpstreamAMessage)
+	} else {
+		slog.Info("Upstream A not configured, skipping")
+	}
+
+	var upstreamBClient mqtt.Client
+	if cfg.UpstreamBBrokerHost != "" {
+		upstreamBClient = makeClient("mqtt-relay-upstream-b", upstreamBBroker, cfg.UpstreamBBrokerUser, cfg.UpstreamBBrokerPass, cfg.UpstreamBBrokerTLS, cfg.UpstreamBTLSServerName, false, relay.HandleUpstreamBMessage)
+	} else {
+		slog.Info("Upstream B not configured, skipping")
+	}
+
 	relay.SetClients(localClient, upstreamAClient, upstreamBClient)
+	upstreamAAddr := ""
+	if cfg.UpstreamABrokerHost != "" {
+		upstreamAAddr = fmt.Sprintf("%s:%d", cfg.UpstreamABrokerHost, cfg.UpstreamABrokerPort)
+	}
+	upstreamBAddr := ""
+	if cfg.UpstreamBBrokerHost != "" {
+		upstreamBAddr = fmt.Sprintf("%s:%d", cfg.UpstreamBBrokerHost, cfg.UpstreamBBrokerPort)
+	}
+	health.SetUpstreams([]UpstreamInfo{
+		{Label: "upstream_a", Host: upstreamAAddr, Client: upstreamAClient},
+		{Label: "upstream_b", Host: upstreamBAddr, Client: upstreamBClient},
+	})
 
 	// Start periodic stats logging goroutine
 	go func() {
-		ticker := time.NewTicker(time.Duration(cfg.CleanupInterval) * time.Second)
+		ticker := time.NewTicker(time.Duration(cfg.StatsInterval) * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
 			slog.Info("Stats",
@@ -312,14 +515,20 @@ func main() {
 		}
 	}()
 
-	// Graceful shutdown on SIGTERM/SIGINT
+	// Graceful shutdown on SIGTERM/SIGINT — uses SHUTDOWN_TIMEOUT_MS to allow
+	// in-flight publishes to drain instead of being severed at 1s.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
 	<-ctx.Done()
-	slog.Info("Shutting down…")
-	localClient.Disconnect(1000)
-	upstreamAClient.Disconnect(1000)
-	upstreamBClient.Disconnect(1000)
+	shutdownTimeout := uint(cfg.ShutdownTimeoutMS)
+	slog.Info("Shutting down…", "timeout_ms", shutdownTimeout)
+	localClient.Disconnect(shutdownTimeout)
+	if upstreamAClient != nil {
+		upstreamAClient.Disconnect(shutdownTimeout)
+	}
+	if upstreamBClient != nil {
+		upstreamBClient.Disconnect(shutdownTimeout)
+	}
 	slog.Info("Disconnected. Goodbye!")
 }

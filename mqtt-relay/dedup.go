@@ -2,10 +2,14 @@ package main
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 // DedupEntry stores first-seen metadata for a message hash.
@@ -15,10 +19,12 @@ type DedupEntry struct {
 }
 
 // DedupStore is a thread-safe deduplication store using sync.Map.
-// Keys are SHA-256 hex strings, values are DedupEntry.
+// Keys are SHA-256 hex strings, values are DedupEntry. The size counter
+// avoids O(N) Range traversal when reporting cache size in /health.
 type DedupStore struct {
 	store sync.Map
 	ttl   time.Duration
+	size  atomic.Int64
 }
 
 // NewDedupStore creates a new dedup store with the given TTL.
@@ -36,6 +42,161 @@ func Hash(topic string, payload []byte) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// CanonicalHash computes a dedup hash that is stable for Meshtastic MQTT
+// packets even when relay/gateway metadata changes. Some brokers/bridges echo
+// the same MeshPacket with mutable fields like hop_limit, via_mqtt, or
+// transport_mechanism changed/removed. Hashing the raw ServiceEnvelope bytes
+// misses those duplicates, so for protobuf packets we hash only the packet
+// identity and encrypted/decoded payload. Non-protobuf payloads fall back to
+// the raw hash above.
+func CanonicalHash(topic string, payload []byte) string {
+	if canonical, ok := canonicalMeshtasticPacket(payload); ok {
+		h := sha256.New()
+		h.Write([]byte(topic))
+		h.Write(canonical)
+		return hex.EncodeToString(h.Sum(nil))
+	}
+	return Hash(topic, payload)
+}
+
+func canonicalMeshtasticPacket(envelope []byte) ([]byte, bool) {
+	packet, ok := serviceEnvelopePacket(envelope)
+	if !ok {
+		return nil, false
+	}
+
+	var from, to, id, channel uint64
+	var encrypted []byte
+	var decoded []byte
+	var haveFrom, haveTo, haveID bool
+
+	buf := packet
+	for len(buf) > 0 {
+		num, typ, n := protowire.ConsumeTag(buf)
+		if n < 0 {
+			return nil, false
+		}
+		buf = buf[n:]
+
+		switch num {
+		case 1: // fixed32 from
+			if typ != protowire.Fixed32Type {
+				return nil, false
+			}
+			v, m := protowire.ConsumeFixed32(buf)
+			if m < 0 {
+				return nil, false
+			}
+			from = uint64(v)
+			haveFrom = true
+			buf = buf[m:]
+		case 2: // fixed32 to
+			if typ != protowire.Fixed32Type {
+				return nil, false
+			}
+			v, m := protowire.ConsumeFixed32(buf)
+			if m < 0 {
+				return nil, false
+			}
+			to = uint64(v)
+			haveTo = true
+			buf = buf[m:]
+		case 3: // uint32 channel hash
+			if typ != protowire.VarintType {
+				return nil, false
+			}
+			v, m := protowire.ConsumeVarint(buf)
+			if m < 0 {
+				return nil, false
+			}
+			channel = v
+			buf = buf[m:]
+		case 4: // decoded Data
+			if typ != protowire.BytesType {
+				return nil, false
+			}
+			v, m := protowire.ConsumeBytes(buf)
+			if m < 0 {
+				return nil, false
+			}
+			decoded = append(decoded[:0], v...)
+			buf = buf[m:]
+		case 5: // encrypted Data
+			if typ != protowire.BytesType {
+				return nil, false
+			}
+			v, m := protowire.ConsumeBytes(buf)
+			if m < 0 {
+				return nil, false
+			}
+			encrypted = append(encrypted[:0], v...)
+			buf = buf[m:]
+		case 6: // fixed32 packet id
+			if typ != protowire.Fixed32Type {
+				return nil, false
+			}
+			v, m := protowire.ConsumeFixed32(buf)
+			if m < 0 {
+				return nil, false
+			}
+			id = uint64(v)
+			haveID = true
+			buf = buf[m:]
+		default:
+			m := protowire.ConsumeFieldValue(num, typ, buf)
+			if m < 0 {
+				return nil, false
+			}
+			buf = buf[m:]
+		}
+	}
+
+	if !haveFrom || !haveTo || !haveID || (len(encrypted) == 0 && len(decoded) == 0) {
+		return nil, false
+	}
+
+	canonical := make([]byte, 0, 8*4+len(encrypted)+len(decoded)+16)
+	canonical = appendUint64(canonical, from)
+	canonical = appendUint64(canonical, to)
+	canonical = appendUint64(canonical, id)
+	canonical = appendUint64(canonical, channel)
+	canonical = append(canonical, encrypted...)
+	canonical = append(canonical, decoded...)
+	return canonical, true
+}
+
+func serviceEnvelopePacket(envelope []byte) ([]byte, bool) {
+	buf := envelope
+	for len(buf) > 0 {
+		num, typ, n := protowire.ConsumeTag(buf)
+		if n < 0 {
+			return nil, false
+		}
+		buf = buf[n:]
+
+		if num == 1 && typ == protowire.BytesType {
+			packet, m := protowire.ConsumeBytes(buf)
+			if m < 0 {
+				return nil, false
+			}
+			return packet, true
+		}
+
+		m := protowire.ConsumeFieldValue(num, typ, buf)
+		if m < 0 {
+			return nil, false
+		}
+		buf = buf[m:]
+	}
+	return nil, false
+}
+
+func appendUint64(dst []byte, v uint64) []byte {
+	var b [8]byte
+	binary.LittleEndian.PutUint64(b[:], v)
+	return append(dst, b[:]...)
+}
+
 // SeenResult returns the dedup evaluation result for a message hash.
 type SeenResult struct {
 	IsNew       bool
@@ -50,13 +211,14 @@ func (d *DedupStore) CheckAndStore(hash, source string) SeenResult {
 
 	val, loaded := d.store.LoadOrStore(hash, entry)
 	if !loaded {
+		d.size.Add(1)
 		return SeenResult{IsNew: true}
 	}
 
 	// Entry exists — check if it's expired
 	prev := val.(DedupEntry)
 	if now-prev.Timestamp >= int64(d.ttl.Seconds()) {
-		// Expired entry, refresh timestamp
+		// Expired entry, refresh timestamp (size unchanged: replace existing key)
 		d.store.Store(hash, entry)
 		return SeenResult{IsNew: true, PreviousSrc: prev.Source}
 	}
@@ -74,15 +236,14 @@ func (d *DedupStore) CleanupLoop(interval time.Duration) {
 		now := time.Now().Unix()
 		ttlSec := int64(d.ttl.Seconds())
 		evicted := 0
-		remaining := 0
 
 		d.store.Range(func(key, value any) bool {
 			entry := value.(DedupEntry)
 			if now-entry.Timestamp >= ttlSec {
-				d.store.Delete(key)
-				evicted++
-			} else {
-				remaining++
+				if d.store.CompareAndDelete(key, entry) {
+					d.size.Add(-1)
+					evicted++
+				}
 			}
 			return true
 		})
@@ -90,18 +251,13 @@ func (d *DedupStore) CleanupLoop(interval time.Duration) {
 		if evicted > 0 {
 			slog.Debug("Cleanup: evicted expired hashes",
 				"evicted", evicted,
-				"remaining", remaining,
+				"remaining", d.size.Load(),
 			)
 		}
 	}
 }
 
-// Size returns the approximate number of entries in the store.
+// Size returns the current number of entries in the store. O(1).
 func (d *DedupStore) Size() int {
-	count := 0
-	d.store.Range(func(_, _ any) bool {
-		count++
-		return true
-	})
-	return count
+	return int(d.size.Load())
 }

@@ -6,8 +6,13 @@ let markers = {};
 let pathLines = {};
 let nodePositions = {};
 let nodeList = [];
+let filteredNodeList = [];
+let selectedNodeHexId = null;
 
 const TRACKER_API = '/api/tracker';
+const MIN_VISIBLE_POSITIONS = 2;
+const DEFAULT_MAP_CENTER = [-2.5, 118];
+const DEFAULT_MAP_ZOOM = 5;
 
 // Session storage keys
 const SESSION_KEY = 'tracker_session';
@@ -36,11 +41,13 @@ function checkSession() {
 }
 
 function initMap() {
-  map = L.map('map').setView([0, 0], 2);
+  map = L.map('map').setView(DEFAULT_MAP_CENTER, DEFAULT_MAP_ZOOM);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '© OpenStreetMap contributors',
     maxZoom: 19
   }).addTo(map);
+
+  map.on('click', clearSelectedNode);
 }
 
 function setupEventListeners() {
@@ -77,6 +84,8 @@ function setupEventListeners() {
       stopAutoRefresh();
     }
   });
+
+  document.getElementById('node-search').addEventListener('input', applySearchFilter);
 }
 
 async function login(password) {
@@ -138,7 +147,8 @@ async function fetchTrackerNodes() {
 
     const data = await response.json();
     // API returns array directly, not {nodes: [...]}
-    nodeList = Array.isArray(data) ? data : (data.nodes || []);
+    const fetchedNodes = Array.isArray(data) ? data : (data.nodes || []);
+    nodeList = fetchedNodes.filter(node => getPositionCount(node) >= MIN_VISIBLE_POSITIONS);
     nodePositions = {};
 
     // Index positions by node from the positions array
@@ -146,6 +156,7 @@ async function fetchTrackerNodes() {
       nodePositions[node.hexId] = node.positions || [];
     });
 
+    applySearchFilter();
     updateNodeList();
     updateMapMarkers();
     updateStats(nodeList.length);
@@ -159,7 +170,7 @@ function updateNodeList() {
   const container = document.getElementById('node-list');
   container.innerHTML = '';
 
-  nodeList.forEach(node => {
+  filteredNodeList.forEach(node => {
     const status = getNodeStatus(node.lastSeen);
     const positions = nodePositions[node.hexId] || [];
 
@@ -184,17 +195,47 @@ function updateNodeList() {
   });
 }
 
-function updateMapMarkers() {
-  const showPaths = document.getElementById('show-paths').checked;
+function applySearchFilter() {
+  const query = document.getElementById('node-search').value.trim().toLowerCase();
+  filteredNodeList = nodeList.filter(node => {
+    if (!query) return true;
 
+    const searchableText = [
+      node.hexId,
+      node.longName,
+      node.shortName,
+      node.hwModel
+    ].filter(Boolean).join(' ').toLowerCase();
+
+    return searchableText.includes(query);
+  });
+
+  if (selectedNodeHexId && !filteredNodeList.some(node => node.hexId === selectedNodeHexId)) {
+    selectedNodeHexId = null;
+  }
+
+  updateNodeList();
+  updateMapMarkers();
+}
+
+function getPositionCount(node) {
+  if (typeof node.positionCount === 'number') return node.positionCount;
+  return Array.isArray(node.positions) ? node.positions.length : 0;
+}
+
+function updateMapMarkers() {
   // Clear old markers and paths
   Object.values(markers).forEach(m => map.removeLayer(m));
   Object.values(pathLines).forEach(l => map.removeLayer(l));
   markers = {};
   pathLines = {};
 
+  if (selectedNodeHexId && !filteredNodeList.some(node => node.hexId === selectedNodeHexId)) {
+    selectedNodeHexId = null;
+  }
+
   // Add new markers
-  nodeList.forEach(node => {
+  filteredNodeList.forEach(node => {
     const positions = nodePositions[node.hexId] || [];
     if (!node.latitude || !node.longitude) return;
 
@@ -226,24 +267,18 @@ function updateMapMarkers() {
 
     markers[node.hexId] = marker;
 
-    // Draw path if enabled and we have positions
-    if (showPaths && positions.length > 1) {
-      // Use last 50 positions for the path
-      const pathPositions = positions.slice(0, 50);
-      const coords = pathPositions.map(p => [p.latitude, p.longitude]);
-      const polyline = L.polyline(coords, {
-        color: status.color,
-        weight: 3,
-        opacity: 0.7
-      }).addTo(map);
-      pathLines[node.hexId] = polyline;
-    }
+    marker.on('click', (e) => {
+      L.DomEvent.stopPropagation(e);
+      selectNode(node.hexId);
+    });
   });
+
+  drawSelectedPath();
 }
 
 function togglePaths(show) {
   if (show) {
-    updateMapMarkers();
+    drawSelectedPath();
   } else {
     Object.values(pathLines).forEach(l => map.removeLayer(l));
     pathLines = {};
@@ -251,9 +286,51 @@ function togglePaths(show) {
 }
 
 function selectNode(hexId) {
+  if (selectedNodeHexId === hexId) {
+    clearSelectedNode();
+    return;
+  }
+
+  selectedNodeHexId = hexId;
+
   document.querySelectorAll('.node-item').forEach(el => {
     el.classList.toggle('active', el.dataset.hexId === hexId);
   });
+
+  drawSelectedPath();
+}
+
+function clearSelectedNode() {
+  selectedNodeHexId = null;
+
+  document.querySelectorAll('.node-item').forEach(el => {
+    el.classList.remove('active');
+  });
+
+  Object.values(pathLines).forEach(l => map.removeLayer(l));
+  pathLines = {};
+}
+
+function drawSelectedPath() {
+  Object.values(pathLines).forEach(l => map.removeLayer(l));
+  pathLines = {};
+
+  if (!selectedNodeHexId || !document.getElementById('show-paths').checked) return;
+
+  const node = filteredNodeList.find(item => item.hexId === selectedNodeHexId);
+  const positions = nodePositions[selectedNodeHexId] || [];
+  if (!node || positions.length <= 1) return;
+
+  const status = getNodeStatus(node.lastSeen);
+  // Use last 50 positions for the selected node path only.
+  const pathPositions = positions.slice(0, 50);
+  const coords = pathPositions.map(p => [p.latitude, p.longitude]);
+  const polyline = L.polyline(coords, {
+    color: status.color,
+    weight: 3,
+    opacity: 0.7
+  }).addTo(map);
+  pathLines[selectedNodeHexId] = polyline;
 }
 
 function updateStats(count) {
@@ -266,6 +343,7 @@ function clearMap() {
   Object.values(pathLines).forEach(l => map.removeLayer(l));
   markers = {};
   pathLines = {};
+  selectedNodeHexId = null;
 }
 
 function getNodeStatus(lastSeen) {

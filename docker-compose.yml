@@ -1,12 +1,15 @@
 services:
   meshnode-mqtt:
-    image: emqx/emqx:5.10.3
+    image: emqx/emqx:6.2.0
     container_name: meshnode-mqtt
+    hostname: meshnode-mqtt.local
     restart: unless-stopped
     environment:
-      - EMQX_NODE__NAME=emqx@127.0.0.1
+      - EMQX_NODE__NAME=emqx@meshnode-mqtt.local
       - EMQX_NODE__DATA_DIR=/opt/emqx/data
       - EMQX_NODE__COOKIE=meshnode-emqx-cookie-2026
+
+      - EMQX_LICENSE__KEY=${EMQX_LICENSE_KEY:-}
 
       - EMQX_LISTENERS__SSL__DEFAULT__BIND=0.0.0.0:8883
       - EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__KEYFILE=/opt/emqx/certs/privkey.pem
@@ -34,18 +37,20 @@ services:
     ports:
       - "1883:1883"
       - "8883:8883"
+      - "127.0.0.1:18083:18083"
+      - "127.0.0.1:18084:18084"
     volumes:
       - ./emqx/acl.conf:/opt/emqx/etc/acl.conf:ro
       - ./emqx/users.conf:/opt/emqx/etc/auth-built-in-db-bootstrap.csv:ro
       - ./emqx/base.hocon:/opt/emqx/etc/base.hocon:ro
-      - ./emqx/certs/fullchain.pem:/opt/emqx/certs/fullchain.pem:ro
-      - ./emqx/certs/privkey.pem:/opt/emqx/certs/privkey.pem:ro
-      - ./emqx/certs/fullchain.pem:/opt/emqx/etc/certs/cert.pem:ro
-      - ./emqx/certs/privkey.pem:/opt/emqx/etc/certs/key.pem:ro
+      - ./certs/letsencrypt/fullchain.pem:/opt/emqx/certs/fullchain.pem:ro
+      - ./certs/letsencrypt/privkey.pem:/opt/emqx/certs/privkey.pem:ro
+      - ./certs/cloudflare/fullchain.pem:/opt/emqx/etc/certs/cert.pem:ro
+      - ./certs/cloudflare/privkey.pem:/opt/emqx/etc/certs/key.pem:ro
       - emqx-data:/opt/emqx/data
       - emqx-log:/opt/emqx/log
     healthcheck:
-      test: ["CMD", "emqx", "ctl", "status"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18083/status | grep -q 'is started'"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -57,9 +62,12 @@ services:
     profiles:
       - phase2-relay
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:8081:8081"
     environment:
       - LOCAL_MQTT_HOST=${LOCAL_MQTT_HOST}
       - LOCAL_MQTT_PORT=${LOCAL_MQTT_PORT}
+      - LOCAL_MQTT_TLS=${LOCAL_MQTT_TLS:-false}
       - LOCAL_MQTT_USERNAME=${LOCAL_MQTT_USERNAME}
       - LOCAL_MQTT_PASSWORD=${LOCAL_MQTT_PASSWORD}
       - UPSTREAM_A_HOST=${UPSTREAM_A_HOST}
@@ -78,10 +86,38 @@ services:
       meshnode-mqtt:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "pgrep -f mqtt-relay || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8081/health >/dev/null || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
+
+  autonotif:
+    build: ./autonotif
+    container_name: autonotif
+    restart: unless-stopped
+    environment:
+      - AUTONOTIF_MQTT_USER=${AUTONOTIF_MQTT_USER}
+      - AUTONOTIF_MQTT_PASS=${AUTONOTIF_MQTT_PASS}
+      - MQTT_HOST=meshnode-mqtt
+      - MQTT_PORT=1883
+      - MQTT_TLS=false
+      - BMKG_SOURCE=inatews2
+      - MIN_MAGNITUDE=4.0
+      - STATE_FILE=/data/autonotif-bmkg-inatews2-state.json
+      - MESHTASTIC_NODE_KEYS_FILE=/data/meshtastic-nodekeys.json
+      - BOT_CONFIG_FILE=/data/autonotif-bot-config.json
+      - LOG_LEVEL=info
+    volumes:
+      - ./autonotif/data:/data
+    depends_on:
+      meshnode-mqtt:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pidof autonotif >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
   meshmap:
     build: ./meshmap
@@ -90,17 +126,21 @@ services:
     ports:
       - "80:80"
       - "443:443"
+      - "127.0.0.1:8080:8080"
     environment:
       - MQTT_BROKER=${MQTT_BROKER}
       - MQTT_USERNAME=${MQTT_USERNAME}
       - MQTT_PASSWORD=${MQTT_PASSWORD}
       - TRACKER_PASSWORD=${TRACKER_PASSWORD}
     volumes:
+      - ./meshmap/nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ./meshmap/website:/usr/share/nginx/html
       - meshmap-data:/data
-      - /etc/letsencrypt/live/${TLS_DOMAIN}/fullchain.pem:/certs/fullchain.pem:ro
-      - /etc/letsencrypt/live/${TLS_DOMAIN}/privkey.pem:/certs/privkey.pem:ro
-      - /etc/letsencrypt/archive/${TLS_DOMAIN}:/certs/archive:ro
+      - ./certs/cloudflare/fullchain.pem:/certs/fullchain.pem:ro
+      - ./certs/cloudflare/privkey.pem:/certs/privkey.pem:ro
+      - /etc/letsencrypt/live/kemplu.dari.asia/fullchain.pem:/letsencrypt/live/kemplu.dari.asia/fullchain.pem:ro
+      - /etc/letsencrypt/live/kemplu.dari.asia/privkey.pem:/letsencrypt/live/kemplu.dari.asia/privkey.pem:ro
+      - /var/www/certbot:/var/www/certbot:ro
     depends_on:
       meshnode-mqtt:
         condition: service_healthy
@@ -109,6 +149,9 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    networks:
+      - default
+      - kemplu_kemplu_net
 
 volumes:
   emqx-data:
@@ -117,3 +160,9 @@ volumes:
     driver: local
   meshmap-data:
     driver: local
+  autonotif-data:
+    driver: local
+
+networks:
+  kemplu_kemplu_net:
+    external: true

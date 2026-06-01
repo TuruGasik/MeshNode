@@ -1,0 +1,16 @@
+{
+  "name": "meshnode-meshmap",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local development server for MeshNode Indonesia meshmap frontend.",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 5178",
+    "dev:api": "go run ./cmd/meshobserv -f ./data/nodes.json -db ./data/nodes.db -m ${MQTT_BROKER:-tcp://localhost:1883} -u ${MQTT_USERNAME:-meshmap} -p ${MQTT_PASSWORD:-meshmap}",
+    "dev:full": "concurrently -k -n api,web -c blue,green \"npm run dev:api\" \"npm run dev\""
+  },
+  "devDependencies": {
+    "@vitejs/plugin-basic-ssl": "latest",
+    "concurrently": "latest",
+    "vite": "latest"
+  }
+}

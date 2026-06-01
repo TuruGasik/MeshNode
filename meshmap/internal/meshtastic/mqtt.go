@@ -4,9 +4,11 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"regexp"
 
@@ -53,6 +55,9 @@ func (c *MQTTClient) Connect() error {
 	opts.SetPassword(c.Password)
 	opts.SetOrderMatters(false)
 	opts.SetDefaultPublishHandler(c.handleMessage)
+	if brokerUsesTLS(c.Broker) {
+		opts.SetTLSConfig(&tls.Config{MinVersion: tls.VersionTLS12, ServerName: mqttTLSServerName(c.Broker)})
+	}
 	c.Client = mqtt.NewClient(opts)
 	token := c.Client.Connect()
 	<-token.Done()
@@ -71,6 +76,28 @@ func (c *MQTTClient) Connect() error {
 	}
 	log.Print("[mqtt] subscribed")
 	return nil
+}
+
+func brokerUsesTLS(broker string) bool {
+	u, err := url.Parse(broker)
+	if err != nil {
+		return false
+	}
+	return u.Scheme == "ssl" || u.Scheme == "tls" || u.Scheme == "mqtts"
+}
+
+func mqttTLSServerName(broker string) string {
+	if serverName := os.Getenv("MQTT_TLS_SERVER_NAME"); serverName != "" {
+		return serverName
+	}
+	if serverName := os.Getenv("TLS_DOMAIN"); serverName != "" {
+		return serverName
+	}
+	u, err := url.Parse(broker)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
 }
 
 func (c *MQTTClient) Disconnect() {
