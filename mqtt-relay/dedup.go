@@ -155,12 +155,18 @@ func canonicalMeshtasticPacket(envelope []byte) ([]byte, bool) {
 		return nil, false
 	}
 
-	canonical := make([]byte, 0, 8*4+len(encrypted)+len(decoded)+16)
+	// Length-prefix encrypted/decoded so two distinct paks (e.g. one with
+	// encrypted=AB|decoded="" and one with encrypted=A|decoded=B) cannot
+	// produce identical canonical bytes. In practice Meshtastic uses a oneof,
+	// but the prefix makes the hash robust to future schema changes.
+	canonical := make([]byte, 0, 8*6+len(encrypted)+len(decoded))
 	canonical = appendUint64(canonical, from)
 	canonical = appendUint64(canonical, to)
 	canonical = appendUint64(canonical, id)
 	canonical = appendUint64(canonical, channel)
+	canonical = appendUint64(canonical, uint64(len(encrypted)))
 	canonical = append(canonical, encrypted...)
+	canonical = appendUint64(canonical, uint64(len(decoded)))
 	canonical = append(canonical, decoded...)
 	return canonical, true
 }
@@ -204,26 +210,36 @@ type SeenResult struct {
 }
 
 // CheckAndStore returns whether the hash is new within the TTL window and
-// records the latest source for routing decisions.
+// records the first-seen source for routing decisions. The PreviousSrc field
+// reflects the source that originally inserted the entry (or, on TTL refresh,
+// the source that owned the just-expired entry).
 func (d *DedupStore) CheckAndStore(hash, source string) SeenResult {
 	now := time.Now().Unix()
+	ttlSec := int64(d.ttl.Seconds())
 	entry := DedupEntry{Timestamp: now, Source: source}
 
-	val, loaded := d.store.LoadOrStore(hash, entry)
-	if !loaded {
-		d.size.Add(1)
-		return SeenResult{IsNew: true}
-	}
+	for {
+		val, loaded := d.store.LoadOrStore(hash, entry)
+		if !loaded {
+			d.size.Add(1)
+			return SeenResult{IsNew: true}
+		}
 
-	// Entry exists — check if it's expired
-	prev := val.(DedupEntry)
-	if now-prev.Timestamp >= int64(d.ttl.Seconds()) {
-		// Expired entry, refresh timestamp (size unchanged: replace existing key)
-		d.store.Store(hash, entry)
-		return SeenResult{IsNew: true, PreviousSrc: prev.Source}
-	}
+		prev := val.(DedupEntry)
+		if now-prev.Timestamp < ttlSec {
+			// Still valid — duplicate.
+			return SeenResult{IsNew: false, PreviousSrc: prev.Source}
+		}
 
-	return SeenResult{IsNew: false, PreviousSrc: prev.Source}
+		// Entry expired. Atomically swap so we don't double-count when the
+		// CleanupLoop deletes it in parallel, and so two concurrent refreshers
+		// can't both claim IsNew=true.
+		if d.store.CompareAndSwap(hash, val, entry) {
+			return SeenResult{IsNew: true, PreviousSrc: prev.Source}
+		}
+		// Lost the race — either CleanupLoop removed the entry or another
+		// goroutine already refreshed it. Retry from the top.
+	}
 }
 
 // CleanupLoop periodically evicts expired hashes from the store.

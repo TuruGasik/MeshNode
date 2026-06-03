@@ -125,9 +125,11 @@ Meshtastic Device
          └──────────┘ └──────────┘
 ```
 
-### 2. Inbound: Upstream → Local
+### 2. Inbound: Upstream → Mesh
 
-Node lain di jaringan mengirim pesan melalui upstream. Relay menangkap dan meneruskan ke broker lokal.
+Node lain di jaringan mengirim pesan melalui upstream. Relay menangkap dan
+meneruskan paket baru ke semua broker lain yang sedang connected: Local dan
+upstream satunya.
 
 ```
         Other Meshtastic Node (remote)
@@ -146,18 +148,19 @@ Node lain di jaringan mengirim pesan melalui upstream. Relay menangkap dan mener
 │ 3. CanonicalHash(topic, payload)         │
 │ 4. dedup.CheckAndStore(hash, "up_a/b")   │
 │ 5. targetsFor("upstream_a/b", seen)      │
-│    ├─ seen.IsNew=true  → relay ke Local  │
+│    ├─ seen.IsNew=true  → relay ke target │
 │    └─ seen.IsNew=false → DROP (duplikat) │
-│ 6. Publish ke Local, stats.RelayedIn++   │
+│ 6. Publish target, RelayedIn += targets  │
 └──────────────────┬───────────────────────┘
-                   │
-                   ▼
-            ┌─────────────┐
-            │ Local EMQX  │
-            └──────┬──────┘
-                   │
-                   ▼
-          Meshtastic Device (lokal)
+         │
+  ┌───────────┴───────────┐
+  ▼                       ▼
+┌─────────────┐          ┌──────────────┐
+│ Local EMQX  │          │ Upstream lain│
+└──────┬──────┘          └──────────────┘
+  │
+  ▼
+Meshtastic Device (lokal)
 ```
 
 ### 3. Echo Suppression
@@ -262,13 +265,21 @@ CheckAndStore("abc123", "local")
       ├─ store.LoadOrStore("abc123", entry)
       │
       ├─ NOT loaded (hash baru)
-      │     └─ return SeenResult{IsNew: true}
+      │     └─ size++, return SeenResult{IsNew: true}
       │
       ├─ LOADED (hash sudah ada)
       │     ├─ Cek TTL: now - prev.Timestamp >= ttl?
-      │     │     ├─ YES (expired) → refresh, return {IsNew: true}
-      │     │     └─ NO (masih valid) → return {IsNew: false, PreviousSrc: prev.Source}
+      │     │     ├─ NO (masih valid) → return {IsNew: false, PreviousSrc: prev.Source}
+      │     │     └─ YES (expired) → store.CompareAndSwap(hash, prev, new_entry)
+      │     │           ├─ swap sukses → return {IsNew: true, PreviousSrc: prev.Source}
+      │     │           └─ swap gagal (race dgn CleanupLoop / refresher lain) → retry loop
 ```
+
+> **Catatan race-safety:** versi awal pakai `Store()` polos saat refresh. Itu race
+> dengan `CleanupLoop.CompareAndDelete` (counter `size` bisa under-count) **dan**
+> race antara dua refresher di TTL boundary (dua-duanya bisa dapat `IsNew=true`,
+> menyebabkan paket diteruskan dua kali). `CompareAndSwap` + retry-loop menutup
+> kedua kasus ini.
 
 **Cleanup Loop** berjalan sebagai goroutine, periodik membersihkan entry yang expired:
 
@@ -288,16 +299,23 @@ CleanupLoop(interval=60s)
 func targetsFor(source, seen) → (targets[], direction)
 ```
 
+Relay beroperasi sebagai **3-way mesh**: setiap paket baru diteruskan ke
+**semua broker lain** yang sedang connected. Dedup yang menjaga agar paket
+yang sama tidak berputar tanpa henti di antara ketiga broker.
+
 | Source | seen.IsNew | Hasil | Arah |
 |---|---|---|---|
 | `local` | `true` | → Upstream A + Upstream B | `OUT` |
 | `local` | `false` | → **DROP** (echo dari relay IN sebelumnya) | `OUT` |
-| `upstream_a` | `true` | → Local | `IN` |
-| `upstream_a` | `false` | → **DROP** (duplikat, sudah diterima dari sumber lain) | `IN` |
-| `upstream_b` | `true` | → Local | `IN` |
-| `upstream_b` | `false` | → **DROP** (duplikat) | `IN` |
+| `upstream_a` | `true` | → Local + Upstream B | `RELAY` |
+| `upstream_a` | `false` | → **DROP** (duplikat, sudah pernah dilihat) | `RELAY` |
+| `upstream_b` | `true` | → Local + Upstream A | `RELAY` |
+| `upstream_b` | `false` | → **DROP** (duplikat) | `RELAY` |
 
-**Catatan penting:** Pesan dari upstream **TIDAK pernah** diteruskan ke upstream lainnya. Hanya diteruskan ke local. Ini mencegah relay menjadi bridge antar-upstream.
+**Catatan penting:** Relay bertindak sebagai bridge antar-upstream juga, bukan
+hanya local↔upstream. Mis. paket yang masuk dari Upstream A dan tidak pernah
+diterima Upstream B akan ikut diteruskan ke Upstream B. Echo balik via Local
+ataupun via Upstream B akan di-drop oleh dedup karena hash-nya sudah tercatat.
 
 ---
 
@@ -323,22 +341,25 @@ func targetsFor(source, seen) → (targets[], direction)
 2. Relay.HandleUpstreamAMessage() dipanggil
 3. CanonicalHash → "hash_Y" (baru)
 4. CheckAndStore("hash_Y", "upstream_a") → IsNew=true
-5. targetsFor("upstream_a", {IsNew:true}) → [Local]
+5. targetsFor("upstream_a", {IsNew:true}) → [Local, Upstream B]
 6. Publish ke Local EMQX ✅
-7. stats.RelayedIn += 1
+7. Publish ke Upstream B ✅ (3-way mesh forward)
+8. stats.RelayedIn += 2
 ```
 
 ### Skenario 3: Echo Suppression (Anti-Loop)
 
 ```
 Lanjutan dari Skenario 2...
-8. Local EMQX menerima pesan → karena Relay subscribe local,
+9. Local EMQX menerima pesan → karena Relay subscribe local,
    Relay.HandleLocalMessage() dipanggil lagi
-9. CanonicalHash → "hash_Y" (sama!)
-10. CheckAndStore("hash_Y", "local") → IsNew=false, PreviousSrc="upstream_a"
-11. targetsFor("local", {IsNew:false}) → nil (DROP)
-12. stats.Dropped += 1
-13. Loop dicegah! ✅
+10. CanonicalHash → "hash_Y" (sama!)
+11. CheckAndStore("hash_Y", "local") → IsNew=false, PreviousSrc="upstream_a"
+12. targetsFor("local", {IsNew:false}) → nil (DROP)
+13. stats.Dropped += 1
+14. Echo via Upstream B (yang barusan di-forward) juga akan kembali sebagai
+    HandleUpstreamBMessage → CheckAndStore → IsNew=false → DROP
+15. Loop dicegah di kedua arah! ✅
 ```
 
 ### Skenario 4: Pesan Sama dari Upstream A dan B
