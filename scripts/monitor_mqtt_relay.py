@@ -105,37 +105,37 @@ if local_host:
     BROKERS.append(BrokerCfg(
         label="LOCAL",
         host=local_host,
-        port=_int("MONITOR_LOCAL_PORT", 1883),
-        tls=_bool("MONITOR_LOCAL_TLS", False),
-        user=os.environ.get("MONITOR_LOCAL_USER", os.environ.get("LOCAL_MQTT_USERNAME", "")),
-        password=os.environ.get("MONITOR_LOCAL_PASS", os.environ.get("LOCAL_MQTT_PASSWORD", "")),
+        port=_int("MONITOR_LOCAL_PORT", _int("RELAY_LOCAL_MQTT_PORT", 1883)),
+        tls=_bool("MONITOR_LOCAL_TLS", _bool("RELAY_LOCAL_MQTT_TLS", False)),
+        user=os.environ.get("MONITOR_LOCAL_USER", os.environ.get("RELAY_LOCAL_MQTT_USERNAME", os.environ.get("LOCAL_MQTT_USERNAME", ""))),
+        password=os.environ.get("MONITOR_LOCAL_PASS", os.environ.get("EMQX_USER_RELAY_PASS", os.environ.get("LOCAL_MQTT_PASSWORD", ""))),
     ))
 
 # upstream A
-up_a_host = os.environ.get("UPSTREAM_A_HOST", "")
+up_a_host = os.environ.get("RELAY_UPSTREAM_A_HOST", os.environ.get("UPSTREAM_A_HOST", ""))
 if up_a_host:
     BROKERS.append(BrokerCfg(
         label="UP_A",
         host=up_a_host,
-        port=_int("UPSTREAM_A_PORT", 1883),
-        tls=_bool("UPSTREAM_A_TLS", False),
-        user=os.environ.get("UPSTREAM_A_USERNAME", ""),
-        password=os.environ.get("UPSTREAM_A_PASSWORD", ""),
+        port=_int("RELAY_UPSTREAM_A_PORT", _int("UPSTREAM_A_PORT", 1883)),
+        tls=_bool("RELAY_UPSTREAM_A_TLS", _bool("UPSTREAM_A_TLS", False)),
+        user=os.environ.get("RELAY_UPSTREAM_A_USERNAME", os.environ.get("UPSTREAM_A_USERNAME", "")),
+        password=os.environ.get("RELAY_UPSTREAM_A_PASSWORD", os.environ.get("UPSTREAM_A_PASSWORD", "")),
     ))
 
 # upstream B
-up_b_host = os.environ.get("UPSTREAM_B_HOST", "")
+up_b_host = os.environ.get("RELAY_UPSTREAM_B_HOST", os.environ.get("UPSTREAM_B_HOST", ""))
 if up_b_host:
     BROKERS.append(BrokerCfg(
         label="UP_B",
         host=up_b_host,
-        port=_int("UPSTREAM_B_PORT", 1883),
-        tls=_bool("UPSTREAM_B_TLS", False),
-        user=os.environ.get("UPSTREAM_B_USERNAME", ""),
-        password=os.environ.get("UPSTREAM_B_PASSWORD", ""),
+        port=_int("RELAY_UPSTREAM_B_PORT", _int("UPSTREAM_B_PORT", 1883)),
+        tls=_bool("RELAY_UPSTREAM_B_TLS", _bool("UPSTREAM_B_TLS", False)),
+        user=os.environ.get("RELAY_UPSTREAM_B_USERNAME", os.environ.get("UPSTREAM_B_USERNAME", "")),
+        password=os.environ.get("RELAY_UPSTREAM_B_PASSWORD", os.environ.get("UPSTREAM_B_PASSWORD", "")),
     ))
 
-TOPIC_ROOT = os.environ.get("TOPIC_ROOT", "msh/ID/#")
+TOPIC_ROOT = os.environ.get("RELAY_TOPIC_ROOT", os.environ.get("TOPIC_ROOT", "msh/ID/#"))
 METRICS_URL = os.environ.get("RELAY_METRICS_URL", "http://localhost:8081/metrics")
 
 # ---------------------------------------------------------------------------
@@ -145,6 +145,11 @@ METRICS_URL = os.environ.get("RELAY_METRICS_URL", "http://localhost:8081/metrics
 # Meshtastic default channel PSK (AQ== expands to this 16-byte AES key)
 _DEFAULT_KEY_BYTES = base64.b64decode("1PG7OiApB1nwvP+rz05pAQ==")
 CHANNEL_KEYS = {"LongFast": "AQ==", "MeshNode_ID": "AQ=="}
+# PSK per-channel dari .env — display-only; relay tidak pernah decrypt
+if os.environ.get("PRIVATE_CHANNEL_PSK"):
+    CHANNEL_KEYS["Private"] = os.environ["PRIVATE_CHANNEL_PSK"]
+if os.environ.get("MESHNODE_ID_CHANNEL_PSK"):
+    CHANNEL_KEYS["MeshNode_ID"] = os.environ["MESHNODE_ID_CHANNEL_PSK"]
 _PORT_TEXT, _PORT_POS, _PORT_NODEINFO, _PORT_TELEMETRY = 1, 3, 4, 67
 
 
@@ -298,17 +303,30 @@ def decode_payload(topic: str, payload: bytes) -> str:
             return payload.decode("utf-8", errors="replace")[:120]
         except Exception:
             return f"<{len(payload)}B>"
+    parts = topic.split("/")
+    ch = parts[4] if len(parts) > 4 else "LongFast"
+    is_pki = ch == "PKI"
     try:
         env = mqtt_pb2.ServiceEnvelope()
         env.ParseFromString(payload)
         pkt = env.packet
-    except Exception as e:
-        return f"[proto err: {e}]"
+    except Exception:
+        if is_pki:
+            try:
+                pkt = mesh_pb2.MeshPacket()
+                pkt.ParseFromString(payload)
+                from_node = getattr(pkt, "from")
+                to_node = pkt.to
+                enc_len = len(pkt.encrypted) if pkt.HasField("encrypted") else 0
+                return (f"!{from_node:08x} → !{to_node:08x} "
+                        f"[PKI DM {enc_len}B encrypted]")
+            except Exception:
+                pass
+            return f"[PKI DM {len(payload)}B]"
+        return f"[parse err {len(payload)}B]"
     from_node = getattr(pkt, "from")
     node = f"!{from_node:08x}"
     if pkt.HasField("encrypted"):
-        parts = topic.split("/")
-        ch = parts[4] if len(parts) > 4 else "LongFast"
         key = _expand_psk(CHANNEL_KEYS.get(ch, "AQ=="))
         plain = _aes_ctr_decrypt(bytes(pkt.encrypted), pkt.id, from_node, key)
         if plain is None:

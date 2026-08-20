@@ -100,35 +100,35 @@ BROKERS: dict[str, Broker] = {
         key="local",
         label="LOCAL",
         host=os.environ.get("MONITOR_LOCAL_HOST", "localhost"),
-        port=_int("MONITOR_LOCAL_PORT", _int("LOCAL_MQTT_PORT", 1883)),
-        tls=_bool("MONITOR_LOCAL_TLS", _bool("LOCAL_MQTT_TLS", False)),
-        user=os.environ.get("MONITOR_LOCAL_USER", os.environ.get("LOCAL_MQTT_USERNAME", "")),
-        password=os.environ.get("MONITOR_LOCAL_PASS", os.environ.get("LOCAL_MQTT_PASSWORD", "")),
+        port=_int("MONITOR_LOCAL_PORT", _int("RELAY_LOCAL_MQTT_PORT", _int("LOCAL_MQTT_PORT", 1883))),
+        tls=_bool("MONITOR_LOCAL_TLS", _bool("RELAY_LOCAL_MQTT_TLS", _bool("LOCAL_MQTT_TLS", False))),
+        user=os.environ.get("MONITOR_LOCAL_USER", os.environ.get("RELAY_LOCAL_MQTT_USERNAME", os.environ.get("LOCAL_MQTT_USERNAME", ""))),
+        password=os.environ.get("MONITOR_LOCAL_PASS", os.environ.get("EMQX_USER_RELAY_PASS", os.environ.get("LOCAL_MQTT_PASSWORD", ""))),
         color="\033[96m",  # cyan
     ),
     "up_a": Broker(
         key="up_a",
         label="UP_A",
-        host=os.environ.get("UPSTREAM_A_HOST", ""),
-        port=_int("UPSTREAM_A_PORT", 1883),
-        tls=_bool("UPSTREAM_A_TLS", False),
-        user=os.environ.get("UPSTREAM_A_USERNAME", ""),
-        password=os.environ.get("UPSTREAM_A_PASSWORD", ""),
+        host=os.environ.get("RELAY_UPSTREAM_A_HOST", os.environ.get("UPSTREAM_A_HOST", "")),
+        port=_int("RELAY_UPSTREAM_A_PORT", _int("UPSTREAM_A_PORT", 1883)),
+        tls=_bool("RELAY_UPSTREAM_A_TLS", _bool("UPSTREAM_A_TLS", False)),
+        user=os.environ.get("RELAY_UPSTREAM_A_USERNAME", os.environ.get("UPSTREAM_A_USERNAME", "")),
+        password=os.environ.get("RELAY_UPSTREAM_A_PASSWORD", os.environ.get("UPSTREAM_A_PASSWORD", "")),
         color="\033[93m",  # yellow
     ),
     "up_b": Broker(
         key="up_b",
         label="UP_B",
-        host=os.environ.get("UPSTREAM_B_HOST", ""),
-        port=_int("UPSTREAM_B_PORT", 1883),
-        tls=_bool("UPSTREAM_B_TLS", False),
-        user=os.environ.get("UPSTREAM_B_USERNAME", ""),
-        password=os.environ.get("UPSTREAM_B_PASSWORD", ""),
+        host=os.environ.get("RELAY_UPSTREAM_B_HOST", os.environ.get("UPSTREAM_B_HOST", "")),
+        port=_int("RELAY_UPSTREAM_B_PORT", _int("UPSTREAM_B_PORT", 1883)),
+        tls=_bool("RELAY_UPSTREAM_B_TLS", _bool("UPSTREAM_B_TLS", False)),
+        user=os.environ.get("RELAY_UPSTREAM_B_USERNAME", os.environ.get("UPSTREAM_B_USERNAME", "")),
+        password=os.environ.get("RELAY_UPSTREAM_B_PASSWORD", os.environ.get("UPSTREAM_B_PASSWORD", "")),
         color="\033[95m",  # magenta
     ),
 }
 
-TOPIC_ROOT = os.environ.get("TOPIC_ROOT", "msh/ID/#")
+TOPIC_ROOT = os.environ.get("RELAY_TOPIC_ROOT", os.environ.get("TOPIC_ROOT", "msh/ID/#"))
 RESET = "\033[0m"
 DIM = "\033[90m"
 
@@ -200,18 +200,31 @@ def decode_payload(topic: str, payload: bytes) -> str:
             return payload.decode("utf-8", errors="replace")[:160]
         except Exception:
             return f"<{len(payload)}B>"
+    parts = topic.split("/")
+    ch = parts[4] if len(parts) > 4 else "LongFast"
+    is_pki = ch == "PKI"
     try:
         env = mqtt_pb2.ServiceEnvelope()
         env.ParseFromString(payload)
         pkt = env.packet
-    except Exception as e:
-        return f"[proto err: {e}]"
+    except Exception:
+        if is_pki:
+            try:
+                pkt = mesh_pb2.MeshPacket()
+                pkt.ParseFromString(payload)
+                from_node = getattr(pkt, "from")
+                to_node = pkt.to
+                enc_len = len(pkt.encrypted) if pkt.HasField("encrypted") else 0
+                return (f"!{from_node:08x} → !{to_node:08x} "
+                        f"[PKI DM {enc_len}B encrypted]")
+            except Exception:
+                pass
+            return f"[PKI DM {len(payload)}B]"
+        return f"[parse err {len(payload)}B]"
     from_node = getattr(pkt, "from")
     node = f"!{from_node:08x}"
     to_node = f"!{pkt.to:08x}"
     if pkt.HasField("encrypted"):
-        parts = topic.split("/")
-        ch = parts[4] if len(parts) > 4 else "LongFast"
         key = _expand_psk(CHANNEL_KEYS.get(ch, "AQ=="))
         plain = _aes_ctr_decrypt(bytes(pkt.encrypted), pkt.id, from_node, key)
         if plain is None:

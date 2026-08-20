@@ -207,6 +207,9 @@ func appendUint64(dst []byte, v uint64) []byte {
 type SeenResult struct {
 	IsNew       bool
 	PreviousSrc string
+	// Entry is the entry stored by CheckAndStore when IsNew is true. It is
+	// the token needed to roll the insertion back via Forget.
+	Entry DedupEntry
 }
 
 // CheckAndStore returns whether the hash is new within the TTL window and
@@ -222,7 +225,7 @@ func (d *DedupStore) CheckAndStore(hash, source string) SeenResult {
 		val, loaded := d.store.LoadOrStore(hash, entry)
 		if !loaded {
 			d.size.Add(1)
-			return SeenResult{IsNew: true}
+			return SeenResult{IsNew: true, Entry: entry}
 		}
 
 		prev := val.(DedupEntry)
@@ -235,10 +238,21 @@ func (d *DedupStore) CheckAndStore(hash, source string) SeenResult {
 		// CleanupLoop deletes it in parallel, and so two concurrent refreshers
 		// can't both claim IsNew=true.
 		if d.store.CompareAndSwap(hash, val, entry) {
-			return SeenResult{IsNew: true, PreviousSrc: prev.Source}
+			return SeenResult{IsNew: true, PreviousSrc: prev.Source, Entry: entry}
 		}
 		// Lost the race — either CleanupLoop removed the entry or another
 		// goroutine already refreshed it. Retry from the top.
+	}
+}
+
+// Forget removes the entry for hash only if it still matches the entry
+// returned by CheckAndStore. Callers use it to roll back an insertion when
+// the message could not be delivered to any target, so a retransmission
+// within the TTL is not swallowed as a duplicate. The compare-and-delete
+// keeps it a no-op when another goroutine has since refreshed the hash.
+func (d *DedupStore) Forget(hash string, entry DedupEntry) {
+	if d.store.CompareAndDelete(hash, entry) {
+		d.size.Add(-1)
 	}
 }
 

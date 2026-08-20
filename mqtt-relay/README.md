@@ -713,19 +713,24 @@ LOG_LEVEL=DEBUG ./mqtt-relay
 │  1. stats.Received++ & per-source counter++                      │
 │  2. health.Touch() → update last_message_at                      │
 │  3. TopicMatcher(topic) → reject jika tidak cocok                │
-│  4. hash = CanonicalHash(topic, payload)                         │
+│  4. msg.Retained()? → skip (replay retained store saat           │
+│     resubscribe, bukan trafik live)                              │
+│  5. hash = CanonicalHash(topic, payload)                         │
 │     └─ protobuf? → hash immutable fields only                   │
 │     └─ non-protobuf? → hash raw bytes                           │
-│  5. seen = dedup.CheckAndStore(hash, source)                     │
+│  6. seen = dedup.CheckAndStore(hash, source)                     │
 │     └─ hash baru / expired → seen.IsNew = true                  │
 │     └─ hash masih valid → seen.IsNew = false                    │
-│  6. targets = targetsFor(source, seen)                           │
+│  7. targets = targetsFor(source, seen)                           │
 │     ├─ local + new → [UpA, UpB]     (outbound relay)            │
 │     ├─ local + !new → []            (echo, DROP)                │
 │     ├─ upstream + new → [Local]     (inbound relay)             │
 │     └─ upstream + !new → []         (duplicate, DROP)           │
-│  7. len(targets)==0 → stats.Dropped++, return                    │
-│  8. for target in targets: client.Publish(topic, 0, false, msg)  │
-│  9. Update stats: RelayedOut (local src) atau RelayedIn (up src) │
+│  8. len(targets)==0 → stats.Dropped++, return                    │
+│     └─ jika seen.IsNew (target down semua): dedup.Forget(hash)  │
+│        supaya retransmisi berikutnya tidak dianggap duplikat    │
+│  9. for target in targets: client.Publish(topic, QoS, false)     │
+│     └─ hitung yang sukses; jika SEMUA gagal → dedup.Forget(hash)│
+│ 10. Update stats: RelayedOut/RelayedIn += jumlah publish sukses  │
 └──────────────────────────────────────────────────────────────────┘
 ```

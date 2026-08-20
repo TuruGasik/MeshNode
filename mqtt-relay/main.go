@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -22,67 +23,71 @@ import (
 
 // Config holds all configuration loaded from environment variables.
 type Config struct {
-	LocalBrokerHost          string
-	LocalBrokerPort          int
-	LocalBrokerTLS           bool
-	LocalBrokerTLSServerName string
-	LocalBrokerUsername      string
-	LocalBrokerPassword      string
-	UpstreamABrokerHost      string
-	UpstreamABrokerPort      int
-	UpstreamABrokerUser      string
-	UpstreamABrokerPass      string
-	UpstreamABrokerTLS       bool
-	UpstreamATLSServerName   string
-	UpstreamBBrokerHost      string
-	UpstreamBBrokerPort      int
-	UpstreamBBrokerUser      string
-	UpstreamBBrokerPass      string
-	UpstreamBBrokerTLS       bool
-	UpstreamBTLSServerName   string
-	TopicRoot                string
-	DedupTTL                 int
-	CleanupInterval          int
-	StatsInterval            int
-	PublishQoS               int
-	SubscribeQoS             int
-	PublishTimeout           int // milliseconds
-	HealthPort               int
-	ShutdownTimeoutMS        int
-	LogLevel                 string
+	LocalBrokerHost             string
+	LocalBrokerPort             int
+	LocalBrokerTLS              bool
+	LocalBrokerTLSServerName    string
+	LocalBrokerUsername         string
+	LocalBrokerPassword         string
+	UpstreamABrokerHost         string
+	UpstreamABrokerPort         int
+	UpstreamABrokerUser         string
+	UpstreamABrokerPass         string
+	UpstreamABrokerTLS          bool
+	UpstreamATLSServerName      string
+	UpstreamAFallbackHosts      []string // additional hosts to try in order on failover
+	UpstreamAFailoverTimeoutSec int      // seconds before rotating to next host
+	UpstreamBBrokerHost         string
+	UpstreamBBrokerPort         int
+	UpstreamBBrokerUser         string
+	UpstreamBBrokerPass         string
+	UpstreamBBrokerTLS          bool
+	UpstreamBTLSServerName      string
+	TopicRoot                   string
+	DedupTTL                    int
+	CleanupInterval             int
+	StatsInterval               int
+	PublishQoS                  int
+	SubscribeQoS                int
+	PublishTimeout              int // milliseconds
+	HealthPort                  int
+	ShutdownTimeoutMS           int
+	LogLevel                    string
 }
 
 // LoadConfig reads configuration from environment variables with defaults.
 func LoadConfig() *Config {
 	return &Config{
-		LocalBrokerHost:          getEnv("LOCAL_MQTT_HOST", "meshnode-mqtt"),
-		LocalBrokerPort:          getEnvInt("LOCAL_MQTT_PORT", 1883),
-		LocalBrokerTLS:           getEnvBool("LOCAL_MQTT_TLS", false),
-		LocalBrokerTLSServerName: getEnvAny([]string{"LOCAL_MQTT_TLS_SERVER_NAME", "MQTT_TLS_SERVER_NAME"}, ""),
-		LocalBrokerUsername:      getEnv("LOCAL_MQTT_USERNAME", ""),
-		LocalBrokerPassword:      getEnv("LOCAL_MQTT_PASSWORD", ""),
-		UpstreamABrokerHost:      getEnv("UPSTREAM_A_HOST", ""),
-		UpstreamABrokerPort:      getEnvInt("UPSTREAM_A_PORT", 1883),
-		UpstreamABrokerUser:      getEnv("UPSTREAM_A_USERNAME", ""),
-		UpstreamABrokerPass:      getEnv("UPSTREAM_A_PASSWORD", ""),
-		UpstreamABrokerTLS:       getEnvBool("UPSTREAM_A_TLS", false),
-		UpstreamATLSServerName:   getEnv("UPSTREAM_A_TLS_SERVER_NAME", ""),
-		UpstreamBBrokerHost:      getEnv("UPSTREAM_B_HOST", ""),
-		UpstreamBBrokerPort:      getEnvInt("UPSTREAM_B_PORT", 1883),
-		UpstreamBBrokerUser:      getEnv("UPSTREAM_B_USERNAME", ""),
-		UpstreamBBrokerPass:      getEnv("UPSTREAM_B_PASSWORD", ""),
-		UpstreamBBrokerTLS:       getEnvBool("UPSTREAM_B_TLS", false),
-		UpstreamBTLSServerName:   getEnv("UPSTREAM_B_TLS_SERVER_NAME", ""),
-		TopicRoot:                getEnv("TOPIC_ROOT", "msh/ID/#"),
-		DedupTTL:                 getEnvInt("DEDUP_TTL", 600),
-		CleanupInterval:          getEnvInt("CLEANUP_INTERVAL", 60),
-		StatsInterval:            getEnvInt("STATS_INTERVAL", 60),
-		PublishQoS:               getEnvInt("PUBLISH_QOS", 0),
-		SubscribeQoS:             getEnvInt("SUBSCRIBE_QOS", 0),
-		PublishTimeout:           getEnvInt("PUBLISH_TIMEOUT_MS", 5000),
-		HealthPort:               getEnvInt("HEALTH_PORT", 8081),
-		ShutdownTimeoutMS:        getEnvInt("SHUTDOWN_TIMEOUT_MS", 5000),
-		LogLevel:                 getEnv("LOG_LEVEL", "INFO"),
+		LocalBrokerHost:             getEnv("LOCAL_MQTT_HOST", "meshnode-mqtt"),
+		LocalBrokerPort:             getEnvInt("LOCAL_MQTT_PORT", 1883),
+		LocalBrokerTLS:              getEnvBool("LOCAL_MQTT_TLS", false),
+		LocalBrokerTLSServerName:    getEnvAny([]string{"LOCAL_MQTT_TLS_SERVER_NAME", "MQTT_TLS_SERVER_NAME"}, ""),
+		LocalBrokerUsername:         getEnv("LOCAL_MQTT_USERNAME", ""),
+		LocalBrokerPassword:         getEnv("LOCAL_MQTT_PASSWORD", ""),
+		UpstreamABrokerHost:         getEnv("UPSTREAM_A_HOST", ""),
+		UpstreamABrokerPort:         getEnvInt("UPSTREAM_A_PORT", 1883),
+		UpstreamABrokerUser:         getEnv("UPSTREAM_A_USERNAME", ""),
+		UpstreamABrokerPass:         getEnv("UPSTREAM_A_PASSWORD", ""),
+		UpstreamABrokerTLS:          getEnvBool("UPSTREAM_A_TLS", false),
+		UpstreamATLSServerName:      getEnv("UPSTREAM_A_TLS_SERVER_NAME", ""),
+		UpstreamAFallbackHosts:      getEnvStringSlice("UPSTREAM_A_FALLBACK_HOSTS"),
+		UpstreamAFailoverTimeoutSec: getEnvInt("UPSTREAM_A_FAILOVER_TIMEOUT", 30),
+		UpstreamBBrokerHost:         getEnv("UPSTREAM_B_HOST", ""),
+		UpstreamBBrokerPort:         getEnvInt("UPSTREAM_B_PORT", 1883),
+		UpstreamBBrokerUser:         getEnv("UPSTREAM_B_USERNAME", ""),
+		UpstreamBBrokerPass:         getEnv("UPSTREAM_B_PASSWORD", ""),
+		UpstreamBBrokerTLS:          getEnvBool("UPSTREAM_B_TLS", false),
+		UpstreamBTLSServerName:      getEnv("UPSTREAM_B_TLS_SERVER_NAME", ""),
+		TopicRoot:                   getEnv("TOPIC_ROOT", "msh/ID/#"),
+		DedupTTL:                    getEnvInt("DEDUP_TTL", 600),
+		CleanupInterval:             getEnvInt("CLEANUP_INTERVAL", 60),
+		StatsInterval:               getEnvInt("STATS_INTERVAL", 60),
+		PublishQoS:                  getEnvInt("PUBLISH_QOS", 0),
+		SubscribeQoS:                getEnvInt("SUBSCRIBE_QOS", 0),
+		PublishTimeout:              getEnvInt("PUBLISH_TIMEOUT_MS", 5000),
+		HealthPort:                  getEnvInt("HEALTH_PORT", 8081),
+		ShutdownTimeoutMS:           getEnvInt("SHUTDOWN_TIMEOUT_MS", 5000),
+		LogLevel:                    getEnv("LOG_LEVEL", "INFO"),
 	}
 }
 
@@ -154,6 +159,22 @@ func getEnvBool(key string, fallback bool) bool {
 	return fallback
 }
 
+// getEnvStringSlice parses a comma-separated env var into a slice, trimming
+// whitespace and dropping empty entries.
+func getEnvStringSlice(key string) []string {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(v, ",") {
+		if s := strings.TrimSpace(part); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // UpstreamInfo holds per-upstream configuration and client reference.
 type UpstreamInfo struct {
 	Label  string
@@ -163,12 +184,13 @@ type UpstreamInfo struct {
 
 // HealthState tracks the health of the relay service.
 type HealthState struct {
-	connected atomic.Bool
-	lastMsgAt atomic.Int64 // unix timestamp
-	startedAt time.Time
-	stats     *Stats
-	dedupSize func() int
-	upstreams []UpstreamInfo
+	connected   atomic.Bool
+	lastMsgAt   atomic.Int64 // unix timestamp
+	startedAt   time.Time
+	stats       *Stats
+	dedupSize   func() int
+	upstreamsMu sync.RWMutex
+	upstreams   []UpstreamInfo
 }
 
 // NewHealthState creates a new HealthState tracker.
@@ -182,7 +204,23 @@ func NewHealthState(stats *Stats, dedupSize func() int) *HealthState {
 
 // SetUpstreams registers upstream clients for health tracking.
 func (h *HealthState) SetUpstreams(upstreams []UpstreamInfo) {
+	h.upstreamsMu.Lock()
+	defer h.upstreamsMu.Unlock()
 	h.upstreams = upstreams
+}
+
+// UpdateUpstreamClient replaces the host+client for the named upstream entry.
+// Called by the failover goroutine when switching to a new host.
+func (h *HealthState) UpdateUpstreamClient(label, host string, client mqtt.Client) {
+	h.upstreamsMu.Lock()
+	defer h.upstreamsMu.Unlock()
+	for i, u := range h.upstreams {
+		if u.Label == label {
+			h.upstreams[i].Host = host
+			h.upstreams[i].Client = client
+			return
+		}
+	}
 }
 
 // SetConnected updates the connection status.
@@ -215,8 +253,13 @@ func (h *HealthState) Status() map[string]any {
 	}
 
 	// Build per-upstream status map
-	upstreamsStatus := make(map[string]any, len(h.upstreams))
-	for _, u := range h.upstreams {
+	h.upstreamsMu.RLock()
+	upstreams := make([]UpstreamInfo, len(h.upstreams))
+	copy(upstreams, h.upstreams)
+	h.upstreamsMu.RUnlock()
+
+	upstreamsStatus := make(map[string]any, len(upstreams))
+	for _, u := range upstreams {
 		configured := u.Host != ""
 		isConnected := u.Client != nil && u.Client.IsConnected()
 		upstreamsStatus[u.Label] = map[string]any{
@@ -328,7 +371,11 @@ func writeMetrics(w io.Writer, h *HealthState) {
 
 	fmt.Fprintln(w, "# HELP mqtt_relay_upstream_connected Upstream connection state per label (1=connected).")
 	fmt.Fprintln(w, "# TYPE mqtt_relay_upstream_connected gauge")
-	for _, u := range h.upstreams {
+	h.upstreamsMu.RLock()
+	upstreams := make([]UpstreamInfo, len(h.upstreams))
+	copy(upstreams, h.upstreams)
+	h.upstreamsMu.RUnlock()
+	for _, u := range upstreams {
 		v := int64(0)
 		if u.Client != nil && u.Client.IsConnected() {
 			v = 1
@@ -353,6 +400,97 @@ func parseSlogLevel(level string) slog.Level {
 	}
 }
 
+// runUpstreamAFailover monitors the upstream-A connection and rotates to the
+// next host in allHosts when the current one stays disconnected for longer
+// than cfg.UpstreamAFailoverTimeoutSec seconds.
+//
+// allHosts is [primary, fallback1, fallback2, …]. The function cycles through
+// them in order (wrapping around) and never stops unless ctx is cancelled.
+func runUpstreamAFailover(
+	ctx context.Context,
+	cfg *Config,
+	allHosts []string,
+	relay *Relay,
+	health *HealthState,
+	makeUpstreamA func(name, broker string) mqtt.Client,
+) {
+	if len(allHosts) < 2 {
+		// Nothing to fail over to.
+		return
+	}
+
+	failoverTimeout := time.Duration(cfg.UpstreamAFailoverTimeoutSec) * time.Second
+	checkInterval := 10 * time.Second
+	ticker := time.NewTicker(checkInterval)
+	defer ticker.Stop()
+
+	currentIdx := 0
+	var disconnectedSince time.Time
+
+	schemeFor := func() string {
+		if cfg.UpstreamABrokerTLS {
+			return "ssl"
+		}
+		return "tcp"
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			client := relay.getUpA()
+			if client != nil && client.IsConnected() {
+				disconnectedSince = time.Time{} // reset
+				continue
+			}
+
+			now := time.Now()
+			if disconnectedSince.IsZero() {
+				disconnectedSince = now
+				slog.Warn("Upstream A disconnected, failover timer started",
+					"host", allHosts[currentIdx],
+					"failover_in", failoverTimeout,
+				)
+				continue
+			}
+
+			if time.Since(disconnectedSince) < failoverTimeout {
+				continue // still within grace period, paho may reconnect on its own
+			}
+
+			// Grace period expired — rotate to the next host.
+			nextIdx := (currentIdx + 1) % len(allHosts)
+			nextHost := allHosts[nextIdx]
+			brokerURL := fmt.Sprintf("%s://%s:%d", schemeFor(), nextHost, cfg.UpstreamABrokerPort)
+
+			slog.Warn("Upstream A failover: switching host",
+				"from", allHosts[currentIdx],
+				"to", nextHost,
+				"disconnected_for", time.Since(disconnectedSince).Round(time.Second),
+			)
+
+			// Disconnect the old client so it stops retry loops.
+			old := relay.SwapUpstreamA(nil) // nil so relay stops routing to it immediately
+			if old != nil {
+				old.Disconnect(500)
+			}
+
+			// Connect to the new host.
+			newClient := makeUpstreamA(fmt.Sprintf("mqtt-relay-upstream-a-%d", nextIdx), brokerURL)
+			relay.SwapUpstreamA(newClient)
+			health.UpdateUpstreamClient(
+				"upstream_a",
+				fmt.Sprintf("%s:%d", nextHost, cfg.UpstreamABrokerPort),
+				newClient,
+			)
+
+			currentIdx = nextIdx
+			disconnectedSince = time.Time{}
+		}
+	}
+}
+
 func main() {
 	cfg := LoadConfig()
 
@@ -370,6 +508,8 @@ func main() {
 	slog.Info("Configuration",
 		"local", fmt.Sprintf("%s:%d", cfg.LocalBrokerHost, cfg.LocalBrokerPort),
 		"upstream_a", fmt.Sprintf("%s:%d", cfg.UpstreamABrokerHost, cfg.UpstreamABrokerPort),
+		"upstream_a_fallbacks", cfg.UpstreamAFallbackHosts,
+		"upstream_a_failover_timeout", fmt.Sprintf("%ds", cfg.UpstreamAFailoverTimeoutSec),
 		"upstream_b", fmt.Sprintf("%s:%d", cfg.UpstreamBBrokerHost, cfg.UpstreamBBrokerPort),
 		"topic_root", cfg.TopicRoot,
 		"dedup_ttl", fmt.Sprintf("%ds", cfg.DedupTTL),
@@ -517,15 +657,37 @@ func main() {
 
 	// Graceful shutdown on SIGTERM/SIGINT — uses SHUTDOWN_TIMEOUT_MS to allow
 	// in-flight publishes to drain instead of being severed at 1s.
+	// Declared early so the failover goroutine can use it as a stop signal.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+
+	// Build the ordered candidate list for upstream-A failover:
+	// [primary, fallback1, fallback2, …]. Only start the goroutine when there
+	// is at least one fallback configured.
+	if cfg.UpstreamABrokerHost != "" && len(cfg.UpstreamAFallbackHosts) > 0 {
+		allUpstreamAHosts := append([]string{cfg.UpstreamABrokerHost}, cfg.UpstreamAFallbackHosts...)
+		makeUpstreamA := func(name, brokerURL string) mqtt.Client {
+			return makeClient(name, brokerURL,
+				cfg.UpstreamABrokerUser, cfg.UpstreamABrokerPass,
+				cfg.UpstreamABrokerTLS, cfg.UpstreamATLSServerName,
+				false, relay.HandleUpstreamAMessage,
+			)
+		}
+		go runUpstreamAFailover(ctx, cfg, allUpstreamAHosts, relay, health, makeUpstreamA)
+		slog.Info("Upstream A failover enabled",
+			"hosts", allUpstreamAHosts,
+			"timeout_sec", cfg.UpstreamAFailoverTimeoutSec,
+		)
+	}
 
 	<-ctx.Done()
 	shutdownTimeout := uint(cfg.ShutdownTimeoutMS)
 	slog.Info("Shutting down…", "timeout_ms", shutdownTimeout)
 	localClient.Disconnect(shutdownTimeout)
-	if upstreamAClient != nil {
-		upstreamAClient.Disconnect(shutdownTimeout)
+	// Disconnect the current upstream-A client (may differ from upstreamAClient
+	// if failover has rotated to a different host since startup).
+	if current := relay.getUpA(); current != nil {
+		current.Disconnect(shutdownTimeout)
 	}
 	if upstreamBClient != nil {
 		upstreamBClient.Disconnect(shutdownTimeout)

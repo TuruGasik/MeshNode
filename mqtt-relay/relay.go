@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -52,6 +53,7 @@ type Relay struct {
 	stats          *Stats
 	onMessage      func() // callback for health tracking
 	local          mqtt.Client
+	upAMu          sync.RWMutex // guards upA for hot-swap during failover
 	upA            mqtt.Client
 	upB            mqtt.Client
 	publishQoS     byte
@@ -73,8 +75,27 @@ func NewRelay(cfg *Config, dedup *DedupStore, onMessage func()) *Relay {
 // SetClients wires the connected MQTT clients into the relay.
 func (r *Relay) SetClients(local, upA, upB mqtt.Client) {
 	r.local = local
+	r.upAMu.Lock()
 	r.upA = upA
+	r.upAMu.Unlock()
 	r.upB = upB
+}
+
+// getUpA returns the current upstream-A client under the read lock.
+func (r *Relay) getUpA() mqtt.Client {
+	r.upAMu.RLock()
+	defer r.upAMu.RUnlock()
+	return r.upA
+}
+
+// SwapUpstreamA atomically replaces the upstream-A client and returns the old
+// one so the caller can disconnect it gracefully.
+func (r *Relay) SwapUpstreamA(newClient mqtt.Client) mqtt.Client {
+	r.upAMu.Lock()
+	defer r.upAMu.Unlock()
+	old := r.upA
+	r.upA = newClient
+	return old
 }
 
 // HandleLocalMessage processes messages originating from the local broker.
@@ -114,10 +135,25 @@ func (r *Relay) handleMessage(source string, msg mqtt.Message) {
 		return
 	}
 
+	// MQTT 3.1.1 sets retained=true only when a broker replays its retained
+	// store to a (re)subscription — live publishes always arrive with
+	// retained=false. Replayed store state is not live traffic: relaying it
+	// would re-publish stale packets (as retained!) to the other brokers
+	// after every reconnect past the dedup TTL.
+	if msg.Retained() {
+		slog.Debug("Skipping retained replay", "topic", topic, "source", source)
+		return
+	}
+
 	msgHash := CanonicalHash(topic, payload)
 	seen := r.dedup.CheckAndStore(msgHash, source)
 	targets, direction := r.targetsFor(source, seen)
 	if len(targets) == 0 {
+		// A new message with no connected target was never delivered anywhere;
+		// forget its hash so a retransmission within the TTL gets a fresh try.
+		if seen.IsNew {
+			r.dedup.Forget(msgHash, seen.Entry)
+		}
 		r.stats.Dropped.Add(1)
 		slog.Debug("DROP",
 			"dir", direction,
@@ -130,8 +166,9 @@ func (r *Relay) handleMessage(source string, msg mqtt.Message) {
 		return
 	}
 
+	succeeded := 0
 	for _, target := range targets {
-		token := target.client.Publish(topic, r.publishQoS, msg.Retained(), payload)
+		token := target.client.Publish(topic, r.publishQoS, false, payload)
 		if !token.WaitTimeout(r.publishTimeout) {
 			slog.Warn("Publish timed out",
 				"dir", direction,
@@ -150,18 +187,28 @@ func (r *Relay) handleMessage(source string, msg mqtt.Message) {
 			)
 			continue
 		}
+		succeeded++
+	}
+
+	if succeeded == 0 {
+		// Every publish failed: the message reached no other broker. Roll back
+		// the dedup entry so a retransmission is not dropped as a duplicate.
+		// (Partial success keeps the entry — forgetting it would duplicate the
+		// message on the targets that already got it.)
+		r.dedup.Forget(msgHash, seen.Entry)
+		return
 	}
 
 	if source == sourceLocal {
-		r.stats.RelayedOut.Add(int64(len(targets)))
+		r.stats.RelayedOut.Add(int64(succeeded))
 	} else {
-		r.stats.RelayedIn.Add(int64(len(targets)))
+		r.stats.RelayedIn.Add(int64(succeeded))
 	}
 
 	slog.Debug("RELAY",
 		"dir", direction,
 		"from", source,
-		"to_count", len(targets),
+		"to_count", succeeded,
 		"topic", topic,
 		"bytes", len(payload),
 		"hash", msgHash[:12],
@@ -180,12 +227,14 @@ func (r *Relay) targetsFor(source string, seen SeenResult) ([]publishTarget, str
 		return nil, directionFor(source)
 	}
 
+	upA := r.getUpA()
+
 	// 3-way mesh: forward each new packet to every OTHER connected broker.
 	var targets []publishTarget
 	switch source {
 	case sourceLocal:
-		if connected(r.upA) {
-			targets = append(targets, publishTarget{client: r.upA, label: sourceUpA})
+		if connected(upA) {
+			targets = append(targets, publishTarget{client: upA, label: sourceUpA})
 		}
 		if connected(r.upB) {
 			targets = append(targets, publishTarget{client: r.upB, label: sourceUpB})
@@ -201,8 +250,8 @@ func (r *Relay) targetsFor(source string, seen SeenResult) ([]publishTarget, str
 		if connected(r.local) {
 			targets = append(targets, publishTarget{client: r.local, label: sourceLocal})
 		}
-		if connected(r.upA) {
-			targets = append(targets, publishTarget{client: r.upA, label: sourceUpA})
+		if connected(upA) {
+			targets = append(targets, publishTarget{client: upA, label: sourceUpA})
 		}
 	default:
 		return nil, "UNKNOWN"
