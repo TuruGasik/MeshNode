@@ -207,16 +207,23 @@ MESHTASTIC_CHANNEL=LongFast ONCE=true go run .
 
 ## Docker Compose
 
-Service `autonotif` sudah dipasang di root `docker-compose.yml`. Override yang aktif di compose:
+Service `autonotif` sudah dipasang di root `docker-compose.yml`. Compose memetakan
+var `AUTONOTIF_*` dari `.env` ke nama env internal yang dibaca binary (Go tidak
+membaca nama ber-prefix langsung). Yang di-wire di compose:
 
-- `AUTONOTIF_MQTT_USER` / `AUTONOTIF_MQTT_PASS` (dari `.env`)
-- `MQTT_HOST=meshnode-mqtt`, `MQTT_PORT=1883`, `MQTT_TLS=false`
-- `BMKG_SOURCE=inatews2`
-- `MIN_MAGNITUDE=4.0`
-- `STATE_FILE=/data/autonotif-bmkg-inatews2-state.json`
-- `MESHTASTIC_NODE_KEYS_FILE=/data/meshtastic-nodekeys.json`
-- `BOT_CONFIG_FILE=/data/autonotif-bot-config.json`
-- `LOG_LEVEL=info`
+- `AUTONOTIF_MQTT_USER` / `AUTONOTIF_MQTT_PASS` → `AUTONOTIF_MQTT_USER` / `AUTONOTIF_MQTT_PASS`
+- `MQTT_HOST` / `MQTT_PORT` / `MQTT_TLS` / `MQTT_TLS_SERVER_NAME` ← `AUTONOTIF_MQTT_*`
+- `MQTT_CLIENT_ID` ← `AUTONOTIF_MQTT_CLIENT_ID`
+- `LOG_LEVEL` ← `AUTONOTIF_LOG_LEVEL`
+- `MESHTASTIC_*` ← `AUTONOTIF_MESHTASTIC_*`
+- `BMKG_SOURCE` / `BMKG_URL` / `BMKG_INATEWS2_URL` / `POLL_INTERVAL` / `MIN_MAGNITUDE` / `STATE_FILE` ← `AUTONOTIF_BMKG_*`
+- `BOT_*` ← `AUTONOTIF_BOT_*`
+- `HANTAVIRUS_*` ← `AUTONOTIF_HANTAVIRUS_*`
+- `ONCE` / `DRY_RUN` / `SEND_ON_START` / `HANTAVIRUS_ONCE` / `MESSAGE` ← var debug `AUTONOTIF_*`
+
+Username MQTT yang dipakai broker adalah `BMKGGempa` (bukan `idmeshnode`), dengan
+password dari `EMQX_USER_BMKGGEMPA_PASS` (section 3). User `BMKGGempa` ini hanya
+punya akses `msh/ID/2/#` sesuai `emqx/acl.conf`.
 
 Konfigurasi lain memakai default dari binary. Volume `./autonotif/data` di-mount ke `/data` untuk persist state, node keys cache, bot config, dan PKI key.
 

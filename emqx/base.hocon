@@ -1,0 +1,162 @@
+## MeshNode custom EMQX base config
+## Bridge mode = true: anti-loop native, no rule filter needed
+## Native EMQX bridge/rule config is kept as a disabled migration reference.
+## Runtime upstream integration is handled by mqtt-relay.
+## NOTE: semua bridge di bawah enable=false. Kredensial upstream sengaja
+## di-redact (REDACTED) - kredensial asli ada di .env (RELAY_UPSTREAM_*).
+## Kalau bridge native diaktifkan lagi, isi ulang username/password di sini.
+
+## System Topic
+## Publishes broker/client lifecycle events to "$SYS" topics for monitoring.
+sys_topics {
+  ## Messages publish interval
+  sys_msg_interval = 1m
+
+  ## Heartbeat interval for uptime/datetime messages
+  sys_heartbeat_interval = 30s
+
+  ## Client event notifications
+  sys_event_messages {
+    client_connected = true
+    client_disconnected = true
+    client_subscribed = true
+    client_unsubscribed = true
+  }
+}
+
+retainer {
+  enable = true
+
+  ## Message Expiry Interval
+  ## 24 jam. Retained message lama otomatis expired.
+  msg_expiry_interval = 24h
+
+  ## Message Clear Interval
+  ## Bersihkan retained message expired tiap 1 jam.
+  msg_clear_interval = 1h
+
+  ## Batas jumlah retained message yang dibersihkan sekali jalan.
+  msg_clear_limit = 1000
+
+  ## Max Payload Size
+  max_payload_size = 256KB
+
+  ## Max Publish Rate
+  max_publish_rate = "500/s"
+
+  ## Delivery Rate
+  delivery_rate = "500/s"
+
+  ## Kalau payload kosong dengan retain=true, tetap publish clear message.
+  stop_publish_clear_msg = false
+
+  backend {
+    type = built_in_database
+
+    ## ram = cepat, tidak persist setelah restart.
+    ## disc = persist, tapi lebih banyak pakai disk.
+    storage_type = ram
+
+    ## Jangan unlimited. 2000 lebih ringan untuk RAM.
+    max_retained_messages = 2000
+  }
+}
+
+bridges {
+  mqtt {
+
+    ## ─── INGRESS ─────────────────────────────────────────────
+    meshnode_community_in {
+      enable = false
+      server = "mqtt.meshnode.id:1883"
+      username = "REDACTED"
+      password = "REDACTED"
+      proto_ver = v4
+      bridge_mode = true
+      ssl { enable = false }
+
+      ingress {
+        remote {
+          topic = "msh/ID/#"
+          qos = 1
+        }
+        local {
+          topic = "${topic}"
+          qos = "${qos}"
+          retain = "${flags.retain}"
+          payload = "${payload}"
+        }
+      }
+    }
+
+    meshtastic_global_in {
+      enable = false
+      server = "mqtt.meshtastic.org:1883"
+      username = "REDACTED"
+      password = "REDACTED"
+      proto_ver = v4
+      bridge_mode = true
+      ssl { enable = false }
+
+      ingress {
+        remote {
+          topic = "msh/ID/#"
+          qos = 1
+        }
+        local {
+          topic = "${topic}"
+          qos = "${qos}"
+          retain = "${flags.retain}"
+          payload = "${payload}"
+        }
+      }
+    }
+
+    ## ─── EGRESS ──────────────────────────────────────────────
+    meshnode_community_out {
+      enable = false
+      server = "mqtt.meshnode.id:1883"
+      username = "REDACTED"
+      password = "REDACTED"
+      proto_ver = v4
+      bridge_mode = true
+      ssl { enable = false }
+
+      egress {
+        local {
+          topic = "msh/ID/#"
+        }
+        remote {
+          topic = "${topic}"
+          qos = 1
+          retain = false
+          payload = "${payload}"
+        }
+      }
+    }
+
+    meshtastic_global_out {
+      enable = false
+      server = "mqtt.meshtastic.org:1883"
+      username = "REDACTED"
+      password = "REDACTED"
+      proto_ver = v4
+      bridge_mode = true
+      ssl { enable = false }
+
+      egress {
+        local {
+          topic = "msh/ID/#"
+        }
+        remote {
+          topic = "${topic}"
+          qos = 1
+          retain = false
+          payload = "${payload}"
+        }
+      }
+    }
+
+  }
+}
+

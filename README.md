@@ -30,7 +30,7 @@ Saat relay aktif, topik `msh/ID/#` dipakai di:
 
 - `docker-compose.yml` → stack aktif
 - `emqx/acl.conf` → ACL runtime EMQX
-- `emqx/users.conf` → bootstrap user EMQX (CSV)
+- `emqx/gen-bootstrap-users.sh` → generate bootstrap user EMQX (CSV) saat container start
 - `emqx/base.hocon` → base config EMQX (listener, dashboard, dll)
 - `certs/letsencrypt/` → TLS cert publik (`fullchain.pem`, `privkey.pem`) untuk listener MQTTS `8883`
 - `certs/cloudflare/` → TLS cert origin Cloudflare untuk dashboard EMQX `18084` & nginx meshmap
@@ -55,9 +55,9 @@ cd MeshNode
 cp .env.example .env
 
 # 2) Buat user EMQX via bootstrap
-# file: emqx/users.conf
-# format: user_id,password,is_superuser
-# atau gunakan emqx dashboard setelah container jalan
+# User di-generate otomatis saat container start oleh
+# emqx/gen-bootstrap-users.sh dari env BOOT_* (dari .env section 3).
+# Tidak perlu file manual.
 
 # 3) Jalankan stack inti
 docker compose up -d
@@ -281,5 +281,5 @@ docker compose down
 |---|---|
 | Address | `mqtt://<host>:1883` |
 | Username | `idmeshnode` |
-| Password | lihat `emqx/users.conf` atau DB EMQX |
+| Password | lihat `EMQX_USER_IDMESHNODE_PASS` di `.env` |
 | Root topic | `msh/ID` |

@@ -1,4 +1,7 @@
 emqx/*
+!emqx/gen-bootstrap-users.sh
+!emqx/acl.conf
+!emqx/base.hocon
 deploy_certs.sh
 meshmap/data/
 .env

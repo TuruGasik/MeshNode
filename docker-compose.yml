@@ -7,7 +7,7 @@ services:
     environment:
       - EMQX_NODE__NAME=emqx@meshnode-mqtt.local
       - EMQX_NODE__DATA_DIR=/opt/emqx/data
-      - EMQX_NODE__COOKIE=meshnode-emqx-cookie-2026
+      - EMQX_NODE__COOKIE=${EMQX_NODE_COOKIE}
 
       - EMQX_LICENSE__KEY=${EMQX_LICENSE_KEY:-}
 
@@ -21,7 +21,7 @@ services:
       - EMQX_AUTHENTICATION__1__MECHANISM=password_based
       - EMQX_AUTHENTICATION__1__PASSWORD_HASH_ALGORITHM__NAME=bcrypt
       - EMQX_AUTHENTICATION__1__USER_ID_TYPE=username
-      - EMQX_AUTHENTICATION__1__BOOTSTRAP_FILE=/opt/emqx/etc/auth-built-in-db-bootstrap.csv
+      - EMQX_AUTHENTICATION__1__BOOTSTRAP_FILE=/tmp/emqx-bootstrap-users.csv
       - EMQX_AUTHENTICATION__1__BOOTSTRAP_TYPE=plain
 
       - EMQX_AUTHORIZATION__SOURCES__1__TYPE=file
@@ -32,7 +32,22 @@ services:
       - EMQX_DASHBOARD__LISTENERS__HTTPS__SSL_OPTIONS__CERTFILE=/opt/emqx/etc/certs/cert.pem
       - EMQX_DASHBOARD__LISTENERS__HTTPS__SSL_OPTIONS__KEYFILE=/opt/emqx/etc/certs/key.pem
 
-      - EMQX_LOG__CONSOLE__LEVEL=info
+      - EMQX_LOG__CONSOLE__LEVEL=${EMQX_LOG_LEVEL}
+
+      # Bootstrap user MQTT dari .env (section 3) via gen-bootstrap-users.sh.
+      # Prefix BOOT_* sengaja beda dari EMQX_* supaya tidak dipetakan ke HOCON.
+      - BOOT_USER_IDMESHNODE=${EMQX_USER_IDMESHNODE_NAME}
+      - BOOT_PASS_IDMESHNODE=${EMQX_USER_IDMESHNODE_PASS}
+      - BOOT_USER_MESHMAP=${MESHMAP_MQTT_USERNAME}
+      - BOOT_PASS_MESHMAP=${EMQX_USER_MESHMAP_PASS}
+      - BOOT_USER_RELAY=${RELAY_LOCAL_MQTT_USERNAME}
+      - BOOT_PASS_RELAY=${EMQX_USER_RELAY_PASS}
+      - BOOT_USER_KEMPLU=${EMQX_USER_KEMPLU_NAME}
+      - BOOT_PASS_KEMPLU=${EMQX_USER_KEMPLU_PASS}
+      - BOOT_USER_AUTONOTIF=${AUTONOTIF_MQTT_USER}
+      - BOOT_PASS_AUTONOTIF=${EMQX_USER_BMKGGEMPA_PASS}
+
+    command: /bin/sh /opt/emqx/etc/gen-bootstrap-users.sh
 
     ports:
       - "1883:1883"
@@ -41,7 +56,7 @@ services:
       - "127.0.0.1:18084:18084"
     volumes:
       - ./emqx/acl.conf:/opt/emqx/etc/acl.conf:ro
-      - ./emqx/users.conf:/opt/emqx/etc/auth-built-in-db-bootstrap.csv:ro
+      - ./emqx/gen-bootstrap-users.sh:/opt/emqx/etc/gen-bootstrap-users.sh:ro
       - ./emqx/base.hocon:/opt/emqx/etc/base.hocon:ro
       - ./certs/letsencrypt/fullchain.pem:/opt/emqx/certs/fullchain.pem:ro
       - ./certs/letsencrypt/privkey.pem:/opt/emqx/certs/privkey.pem:ro
@@ -49,6 +64,14 @@ services:
       - ./certs/cloudflare/privkey.pem:/opt/emqx/etc/certs/key.pem:ro
       - emqx-data:/opt/emqx/data
       - emqx-log:/opt/emqx/log
+    networks:
+      default:
+        ipv4_address: 172.18.0.10
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18083/status | grep -q 'is started'"]
       interval: 30s
@@ -65,26 +88,44 @@ services:
     ports:
       - "127.0.0.1:8081:8081"
     environment:
-      - LOCAL_MQTT_HOST=${LOCAL_MQTT_HOST}
-      - LOCAL_MQTT_PORT=${LOCAL_MQTT_PORT}
-      - LOCAL_MQTT_TLS=${LOCAL_MQTT_TLS:-false}
-      - LOCAL_MQTT_USERNAME=${LOCAL_MQTT_USERNAME}
-      - LOCAL_MQTT_PASSWORD=${LOCAL_MQTT_PASSWORD}
-      - UPSTREAM_A_HOST=${UPSTREAM_A_HOST}
-      - UPSTREAM_A_PORT=${UPSTREAM_A_PORT}
-      - UPSTREAM_A_USERNAME=${UPSTREAM_A_USERNAME}
-      - UPSTREAM_A_PASSWORD=${UPSTREAM_A_PASSWORD}
-      - UPSTREAM_B_HOST=${UPSTREAM_B_HOST}
-      - UPSTREAM_B_PORT=${UPSTREAM_B_PORT}
-      - UPSTREAM_B_USERNAME=${UPSTREAM_B_USERNAME}
-      - UPSTREAM_B_PASSWORD=${UPSTREAM_B_PASSWORD}
-      - TOPIC_ROOT=${TOPIC_ROOT}
-      - DEDUP_TTL=${DEDUP_TTL}
-      - CLEANUP_INTERVAL=${CLEANUP_INTERVAL}
+      - LOCAL_MQTT_HOST=${RELAY_LOCAL_MQTT_HOST}
+      - LOCAL_MQTT_PORT=${RELAY_LOCAL_MQTT_PORT}
+      - LOCAL_MQTT_TLS=${RELAY_LOCAL_MQTT_TLS:-false}
+      - LOCAL_MQTT_TLS_SERVER_NAME=${RELAY_LOCAL_MQTT_TLS_SERVER_NAME}
+      - LOCAL_MQTT_USERNAME=${RELAY_LOCAL_MQTT_USERNAME}
+      - LOCAL_MQTT_PASSWORD=${EMQX_USER_RELAY_PASS}
+      - UPSTREAM_A_HOST=${RELAY_UPSTREAM_A_HOST}
+      - UPSTREAM_A_PORT=${RELAY_UPSTREAM_A_PORT}
+      - UPSTREAM_A_USERNAME=${RELAY_UPSTREAM_A_USERNAME}
+      - UPSTREAM_A_PASSWORD=${RELAY_UPSTREAM_A_PASSWORD}
+      - UPSTREAM_A_TLS=${RELAY_UPSTREAM_A_TLS:-false}
+      - UPSTREAM_A_TLS_SERVER_NAME=${RELAY_UPSTREAM_A_TLS_SERVER_NAME}
+      - UPSTREAM_A_FALLBACK_HOSTS=${RELAY_UPSTREAM_A_FALLBACK_HOSTS}
+      - UPSTREAM_A_FAILOVER_TIMEOUT=${RELAY_UPSTREAM_A_FAILOVER_TIMEOUT}
+      - UPSTREAM_B_HOST=${RELAY_UPSTREAM_B_HOST}
+      - UPSTREAM_B_PORT=${RELAY_UPSTREAM_B_PORT}
+      - UPSTREAM_B_USERNAME=${RELAY_UPSTREAM_B_USERNAME}
+      - UPSTREAM_B_PASSWORD=${RELAY_UPSTREAM_B_PASSWORD}
+      - UPSTREAM_B_TLS=${RELAY_UPSTREAM_B_TLS:-false}
+      - UPSTREAM_B_TLS_SERVER_NAME=${RELAY_UPSTREAM_B_TLS_SERVER_NAME}
+      - TOPIC_ROOT=${RELAY_TOPIC_ROOT}
+      - DEDUP_TTL=${RELAY_DEDUP_TTL}
+      - CLEANUP_INTERVAL=${RELAY_CLEANUP_INTERVAL}
+      - STATS_INTERVAL=${RELAY_STATS_INTERVAL}
+      - PUBLISH_QOS=${RELAY_PUBLISH_QOS}
+      - SUBSCRIBE_QOS=${RELAY_SUBSCRIBE_QOS}
+      - PUBLISH_TIMEOUT_MS=${RELAY_PUBLISH_TIMEOUT_MS}
+      - HEALTH_PORT=${RELAY_HEALTH_PORT}
+      - SHUTDOWN_TIMEOUT_MS=${RELAY_SHUTDOWN_TIMEOUT_MS}
       - LOG_LEVEL=${RELAY_LOG_LEVEL}
     depends_on:
       meshnode-mqtt:
         condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8081/health >/dev/null || exit 1"]
       interval: 30s
@@ -98,20 +139,52 @@ services:
     environment:
       - AUTONOTIF_MQTT_USER=${AUTONOTIF_MQTT_USER}
       - AUTONOTIF_MQTT_PASS=${AUTONOTIF_MQTT_PASS}
-      - MQTT_HOST=meshnode-mqtt
-      - MQTT_PORT=1883
-      - MQTT_TLS=false
-      - BMKG_SOURCE=inatews2
-      - MIN_MAGNITUDE=4.0
-      - STATE_FILE=/data/autonotif-bmkg-inatews2-state.json
-      - MESHTASTIC_NODE_KEYS_FILE=/data/meshtastic-nodekeys.json
-      - BOT_CONFIG_FILE=/data/autonotif-bot-config.json
-      - LOG_LEVEL=info
+      - MQTT_HOST=${AUTONOTIF_MQTT_HOST}
+      - MQTT_PORT=${AUTONOTIF_MQTT_PORT}
+      - MQTT_TLS=${AUTONOTIF_MQTT_TLS:-false}
+      - MQTT_TLS_SERVER_NAME=${AUTONOTIF_MQTT_TLS_SERVER_NAME}
+      - MQTT_CLIENT_ID=${AUTONOTIF_MQTT_CLIENT_ID}
+      - LOG_LEVEL=${AUTONOTIF_LOG_LEVEL}
+      - MESHTASTIC_TOPIC_ROOT=${AUTONOTIF_MESHTASTIC_TOPIC_ROOT}
+      - MESHTASTIC_CHANNEL=${AUTONOTIF_MESHTASTIC_CHANNEL}
+      - MESHTASTIC_PRIVATE_KEY=${AUTONOTIF_MESHTASTIC_PRIVATE_KEY}
+      - MESHTASTIC_PKI_PRIVATE_KEY=${AUTONOTIF_MESHTASTIC_PKI_PRIVATE_KEY:-}
+      - MESHTASTIC_PKI_KEY_FILE=${AUTONOTIF_MESHTASTIC_PKI_KEY_FILE}
+      - MESHTASTIC_NODE_KEYS_FILE=${AUTONOTIF_MESHTASTIC_NODE_KEYS_FILE}
+      - MESHTASTIC_FROM_NODE=${AUTONOTIF_MESHTASTIC_FROM_NODE}
+      - MESHTASTIC_HOP_LIMIT=${AUTONOTIF_MESHTASTIC_HOP_LIMIT}
+      - MESHTASTIC_LONG_NAME=${AUTONOTIF_MESHTASTIC_LONG_NAME}
+      - MESHTASTIC_SHORT_NAME=${AUTONOTIF_MESHTASTIC_SHORT_NAME}
+      - MESHTASTIC_HW_MODEL=${AUTONOTIF_MESHTASTIC_HW_MODEL}
+      - MESHTASTIC_ROLE=${AUTONOTIF_MESHTASTIC_ROLE}
+      - NODE_INFO_INTERVAL=${AUTONOTIF_NODE_INFO_INTERVAL}
+      - BMKG_SOURCE=${AUTONOTIF_BMKG_SOURCE}
+      - BMKG_URL=${AUTONOTIF_BMKG_URL}
+      - BMKG_INATEWS2_URL=${AUTONOTIF_BMKG_INATEWS2_URL}
+      - POLL_INTERVAL=${AUTONOTIF_POLL_INTERVAL}
+      - MIN_MAGNITUDE=${AUTONOTIF_MIN_MAGNITUDE}
+      - STATE_FILE=${AUTONOTIF_STATE_FILE}
+      - BOT_ENABLE_RESPONDER=${AUTONOTIF_BOT_ENABLE_RESPONDER}
+      - BOT_REPLY_TO_DM=${AUTONOTIF_BOT_REPLY_TO_DM}
+      - BOT_ADMIN_NODES=${AUTONOTIF_BOT_ADMIN_NODES}
+      - BOT_CONFIG_FILE=${AUTONOTIF_BOT_CONFIG_FILE}
+      - HANTAVIRUS_DB_PATH=${AUTONOTIF_HANTAVIRUS_DB_PATH}
+      - HANTAVIRUS_RAILWAY_URL=${AUTONOTIF_HANTAVIRUS_RAILWAY_URL}
+      - ONCE=${AUTONOTIF_ONCE:-}
+      - DRY_RUN=${AUTONOTIF_DRY_RUN:-}
+      - SEND_ON_START=${AUTONOTIF_SEND_ON_START:-}
+      - HANTAVIRUS_ONCE=${AUTONOTIF_HANTAVIRUS_ONCE:-}
+      - MESSAGE=${AUTONOTIF_MESSAGE:-}
     volumes:
       - ./autonotif/data:/data
     depends_on:
       meshnode-mqtt:
         condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD-SHELL", "pidof autonotif >/dev/null || exit 1"]
       interval: 30s
@@ -128,10 +201,11 @@ services:
       - "443:443"
       - "127.0.0.1:8080:8080"
     environment:
-      - MQTT_BROKER=${MQTT_BROKER}
-      - MQTT_USERNAME=${MQTT_USERNAME}
-      - MQTT_PASSWORD=${MQTT_PASSWORD}
-      - TRACKER_PASSWORD=${TRACKER_PASSWORD}
+      - MQTT_BROKER=${MESHMAP_MQTT_BROKER}
+      - MQTT_USERNAME=${MESHMAP_MQTT_USERNAME}
+      - MQTT_PASSWORD=${EMQX_USER_MESHMAP_PASS}
+      - MQTT_TLS_SERVER_NAME=${MESHMAP_MQTT_TLS_SERVER_NAME}
+      - TRACKER_PASSWORD=${MESHMAP_TRACKER_PASSWORD}
     volumes:
       - ./meshmap/nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ./meshmap/website:/usr/share/nginx/html
@@ -141,17 +215,22 @@ services:
       - /etc/letsencrypt/live/kemplu.dari.asia/fullchain.pem:/letsencrypt/live/kemplu.dari.asia/fullchain.pem:ro
       - /etc/letsencrypt/live/kemplu.dari.asia/privkey.pem:/letsencrypt/live/kemplu.dari.asia/privkey.pem:ro
       - /var/www/certbot:/var/www/certbot:ro
+    networks:
+      default:
+        ipv4_address: 172.18.0.5
     depends_on:
       meshnode-mqtt:
         condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/api/nodes/stats >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
-    networks:
-      - default
-      - kemplu_kemplu_net
 
 volumes:
   emqx-data:
@@ -164,5 +243,8 @@ volumes:
     driver: local
 
 networks:
-  kemplu_kemplu_net:
-    external: true
+  default:
+    ipam:
+      config:
+        - subnet: 172.18.0.0/16
+
